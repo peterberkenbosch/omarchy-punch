@@ -17,14 +17,14 @@ Punch is one plugin wearing three hats. The **service** owns the clock, the
 running entry survives a panel closing, a bar reload, or a monitor appearing.
 
 ```bash
-omarchy plugin add https://github.com/peterberkenbosch/omarchy-punch.git --enable --yes
+omarchy plugin add https://github.com/peterberkenbosch/punch.git --enable --yes
 ln -sf ~/.config/omarchy/plugins/pb.punch/bin/punch ~/.local/bin/punch
 ```
 
 Or, working on a local checkout:
 
 ```bash
-git clone <repo> ~/.config/omarchy/plugins/pb.punch
+git clone git@github.com:peterberkenbosch/punch.git ~/.config/omarchy/plugins/pb.punch
 omarchy-shell shell rescanPlugins
 omarchy plugin enable pb.punch --section right
 ```
