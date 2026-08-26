@@ -154,6 +154,14 @@ Panel {
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: visible ? button.implicitHeight : 0
 
+  // Stopping collapses the pill from a name and a clock down to one glyph,
+  // which used to yank every widget to its left ~90px sideways in a single
+  // frame — right under the cursor that just clicked. Animating the width the
+  // bar lays out from turns that lurch into a slide.
+  Behavior on implicitWidth {
+    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+  }
+
   // ------------------------------------------------------------- the pill
 
   WidgetButton {
