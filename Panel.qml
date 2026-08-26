@@ -192,6 +192,7 @@ Panel {
     // Behind the label while running: a tinted bed in the project's color,
     // with a fill that crosses it once per hour of tracked time.
     Rectangle {
+      id: bed
       z: -1
       anchors.centerIn: parent
       width: root.vertical ? Style.bar.iconSlot - Style.space(4) : parent.width - Style.space(2)
@@ -199,13 +200,26 @@ Panel {
       radius: Math.max(Style.cornerRadius, height / 2)
       visible: root.tracking
       color: Util.alpha(root.barActiveColor, 0.14)
-      clip: true
 
-      Rectangle {
+      // The fill is a full-size copy of the pill revealed through a square
+      // window, not a rounded rect of its own. A rounded rect sized to the
+      // fill capped its right edge into a blob instead of a progress edge,
+      // and QML's clip is rectangular, so clipping the bed could not hold
+      // that shape to the pill's silhouette either. Masking this way keeps
+      // the left cap exactly the pill's and the leading edge exactly
+      // vertical, at every width.
+      Item {
         height: parent.height
         width: Math.round(parent.width * root.hourFill)
-        radius: parent.radius
-        color: Util.alpha(root.barActiveColor, 0.18)
+        clip: true
+
+        Rectangle {
+          width: bed.width
+          height: bed.height
+          radius: bed.radius
+          color: Util.alpha(root.barActiveColor, 0.18)
+        }
+
         Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
       }
     }
