@@ -24,8 +24,6 @@ check("preciseDuration", M.preciseDuration(3600 + 24 * 60 + 9), "1:24:09")
 check("humanDuration hours", M.humanDuration(5400), "1h 30m")
 check("humanDuration exact hour", M.humanDuration(3600), "1h")
 check("humanDuration minutes", M.humanDuration(120), "2m")
-check("hourFraction half", M.hourFraction(1800), 0.5)
-check("hourFraction wraps", M.hourFraction(3600 + 1800), 0.5)
 
 // Rounding is off by default and always rounds up when on.
 check("roundedEnd off", M.roundedEnd(0, 61, 0), 61)

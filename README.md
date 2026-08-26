@@ -4,9 +4,9 @@ Time tracking for [Omarchy](https://omarchy.org), built for the case that
 actually happens forty times a day: you switch what you are working on and you
 do not want to think about the tracker.
 
-The bar pill is not a launcher for a timer. It **is** the timer — project,
-elapsed time, and a fill that creeps across as the current hour of tracked time
-runs out, so "what am I on and for how long" costs a glance. Starting the clock
+The bar pill is not a launcher for a timer. It **is** the timer — the project
+and the running clock, in that project's color, so "what am I on and for how
+long" costs a glance and no clicks. Starting the clock
 on the thing you were doing an hour ago is one keypress; starting it on
 something new is a keypress and a few letters.
 
@@ -45,8 +45,7 @@ o.bind("SUPER + ALT + T", "Punch: switch project", "punch pick")
 ## The pill
 
 Stopped, it is a quiet glyph. Running, it becomes a pill in the project's color
-carrying the name and the elapsed time, with a second fill creeping across once
-per hour of tracked time.
+carrying the name and the elapsed time.
 
 | Interaction | What it does |
 |---|---|

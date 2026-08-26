@@ -75,13 +75,6 @@ function humanDuration(seconds) {
   return s + "s"
 }
 
-// How far into the current hour this entry has run. Drives the pill's fill,
-// so a glance says "nearly another hour on the clock" without reading digits.
-function hourFraction(seconds) {
-  var s = Math.max(0, Math.floor(seconds))
-  return (s % 3600) / 3600
-}
-
 // Rounding is applied when an entry is stopped, never to the live timer:
 // what you see running is real time, what lands in the log is billable time.
 function roundedEnd(start, end, roundToMinutes) {
@@ -384,7 +377,6 @@ if (typeof module !== "undefined") {
     clockDuration: clockDuration,
     preciseDuration: preciseDuration,
     humanDuration: humanDuration,
-    hourFraction: hourFraction,
     roundedEnd: roundedEnd,
     hashString: hashString,
     newId: newId,
