@@ -157,7 +157,12 @@ Item {
     projects = Model.touchProject(projects, name, at)
     persistState()
     changed()
-    return Model.statusLine(running, at - startAt)
+
+    var line = Model.statusLine(running, at - startAt)
+    // Say so when the overlap guard ate the backdate, rather than reporting
+    // a start time that quietly is not the one that was asked for.
+    if (backdate > 0 && startAt > at - backdate) line += " (backdate clipped to the last entry)"
+    return line
   }
 
   function startInput(text) {

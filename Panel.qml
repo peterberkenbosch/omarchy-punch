@@ -21,10 +21,18 @@ Panel {
     ? bar.shell.serviceFor("pb.punch") : null
   property var registeredService: null
 
-  readonly property bool tracking: !!punch && !!punch.running
-  readonly property string projectName: punch ? String(punch.project) : ""
+  // Read the running entry through one property and test *that* everywhere.
+  // Deriving a boolean first and dereferencing later leaves a window where
+  // the boolean is still true and the entry is already gone.
+  readonly property var live: punch && punch.running ? punch.running : null
+  readonly property bool tracking: live !== null
+  readonly property string projectName: live ? String(live.project) : ""
   readonly property int elapsed: punch ? punch.elapsed : 0
   readonly property real hourFill: tracking ? Model.hourFraction(elapsed) : 0
+
+  // Ui/Panel is the popup base, not the widget base, so the bar geometry
+  // every layout branch reads has to come off the host directly.
+  readonly property bool vertical: bar ? bar.vertical === true : false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -60,8 +68,8 @@ Panel {
   property bool cursorActive: false
 
   readonly property var dayEntries: punch ? punch.todayEntries : []
-  readonly property var liveEntry: tracking
-    ? Model.clipToRange({ id: "running", project: punch.running.project, note: punch.running.note, start: punch.running.start, end: punch.nowSec },
+  readonly property var liveEntry: live && punch
+    ? Model.clipToRange({ id: "running", project: live.project, note: live.note, start: live.start, end: punch.nowSec },
         punch.todayStart, Model.dayEnd(punch.todayStart))
     : null
   // The running stretch sits in the list like any other row so the day reads
@@ -302,8 +310,8 @@ Panel {
 
                 Text {
                   Layout.fillWidth: true
-                  visible: root.tracking && root.punch && root.punch.running.note !== ""
-                  text: root.tracking && root.punch ? root.punch.running.note : ""
+                  visible: !!root.live && root.live.note !== ""
+                  text: root.live ? root.live.note : ""
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -376,7 +384,7 @@ Panel {
           // ---- day and week totals
           Row {
             width: parent.width
-            spacing: Style.space(16)
+            spacing: Style.space(32)
 
             Total { label: "TODAY"; seconds: root.punch ? root.punch.todaySeconds : 0 }
             Total { label: "THIS WEEK"; seconds: root.punch ? root.punch.weekSeconds : 0 }
