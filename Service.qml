@@ -110,7 +110,17 @@ Item {
     widgets = next
   }
 
+  // The bar already knows which of its per-monitor copies of a widget the
+  // focused output owns, including the zero-size placeholder an anchored
+  // center module leaves behind. Ask it rather than opening whichever
+  // instance happened to register first, which put the panel on the laptop
+  // display while you were working on another screen.
   function openPanel() {
+    var id = manifest && manifest.id ? String(manifest.id) : "pb.punch"
+    if (shell && shell.bar && typeof shell.bar.summonBarWidget === "function"
+        && shell.bar.summonBarWidget(id) === true) return true
+
+    // Fallback for a replacement bar that does not offer the router.
     for (var i = 0; i < widgets.length; i++) {
       if (widgets[i] && typeof widgets[i].open === "function" && widgets[i].visible !== false) {
         widgets[i].open()
