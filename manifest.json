@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "id": "pb.punch",
+  "name": "Punch",
+  "version": "1.0.0",
+  "author": "Peter Berkenbosch",
+  "license": "MIT",
+  "description": "Fast time tracking in the Omarchy bar: one pill that is the running timer, a keyboard quick switcher, and a day panel.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml",
+    "overlay": "QuickSwitch.qml"
+  },
+  "barWidget": {
+    "displayName": "Punch",
+    "description": "Running timer in the bar. Left opens the day panel, right starts or stops, middle opens the quick switcher, scroll cycles recent projects.",
+    "category": "Time",
+    "aliases": ["punch", "timer", "time-tracking"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "idleThresholdSec": 900,
+      "hideWhenStopped": false,
+      "showProjectName": true,
+      "roundToMinutes": 0
+    },
+    "schema": [
+      {
+        "key": "idleThresholdSec",
+        "type": "integer",
+        "label": "Ask about idle time after (seconds)",
+        "min": 0,
+        "max": 7200,
+        "step": 60,
+        "defaultValue": 900,
+        "description": "Notify when you come back from being away this long while the clock ran. 0 turns idle detection off."
+      },
+      {
+        "key": "hideWhenStopped",
+        "type": "boolean",
+        "label": "Hide the pill when nothing is running",
+        "defaultValue": false
+      },
+      {
+        "key": "showProjectName",
+        "type": "boolean",
+        "label": "Show the project name in the bar",
+        "defaultValue": true
+      },
+      {
+        "key": "roundToMinutes",
+        "type": "integer",
+        "label": "Round finished entries up to (minutes)",
+        "min": 0,
+        "max": 60,
+        "step": 5,
+        "defaultValue": 0,
+        "description": "0 keeps exact durations. 15 rounds every stopped entry up to the next quarter hour."
+      }
+    ]
+  }
+}
