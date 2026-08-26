@@ -39,6 +39,11 @@ o.bind("SUPER + ALT + T", "Punch: switch project", "punch pick")
 
 ## The pill
 
+Stopped, it is an outlined pill naming the project one keypress would pick back
+up. Running, it fills with that project's color and carries the elapsed time,
+with a second fill creeping across once per hour of tracked time. Same shape in
+both states, so it never jumps around the bar when you start or stop.
+
 | Interaction | What it does |
 |---|---|
 | left | open the day panel |
@@ -148,10 +153,11 @@ into both days when it is read, never counted twice.
 
 ## Hacking on it
 
-Editing the QML under `~/.config/omarchy/plugins/pb.punch/` hot-reloads the bar
-widget and the overlay on save. **Changes to `Service.qml` need a full
-`omarchy restart shell`** — a hot reload leaves the old service instance holding
-the `punch` IPC target, so the CLI keeps talking to the code you just replaced.
+Omarchy watches `~/.config/omarchy/plugins/` and reloads plugin code on save,
+but in practice that did not swap either the service or the bar widget here:
+the old service kept the `punch` IPC target, and the widget kept its old
+component. **Run `omarchy restart shell` after editing any QML in this plugin**,
+or you will spend a while debugging code that is not running.
 
 `Model.js` is Qt-free so the arithmetic that decides what gets billed can be
 checked without a compositor:

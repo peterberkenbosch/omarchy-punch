@@ -39,8 +39,9 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property string idleGlyph: "󰥔"
+  readonly property string idleGlyph: "󰔛"
   readonly property string runGlyph: "󰑊"
+  readonly property string resumeProject: punch ? String(punch.lastProject) : ""
 
   function projectColor(name) {
     if (!name) return foreground
@@ -53,9 +54,12 @@ Panel {
   readonly property bool showProjectName: punch ? punch.setting("showProjectName", true) === true : true
   readonly property bool hideWhenStopped: punch ? punch.setting("hideWhenStopped", false) === true : false
 
+  // Stopped is not nothing to say: the pill names the project that one
+  // keypress would pick back up, so the same glance answers "what would I
+  // resume" as answers "what am I on".
   readonly property string pillLabel: {
     if (root.vertical) return ""
-    if (!tracking) return idleGlyph
+    if (!tracking) return showProjectName && resumeProject ? idleGlyph + "  " + resumeProject : idleGlyph
     var parts = [runGlyph]
     if (showProjectName && projectName) parts.push(projectName)
     parts.push(Model.clockDuration(elapsed))
@@ -161,9 +165,9 @@ Panel {
     text: root.pillLabel
     labelVisible: !root.vertical
     hasVisualContent: root.vertical || text !== ""
-    fixedWidth: root.vertical ? -1 : (root.tracking ? -1 : Style.bar.iconSlot)
-    horizontalMargin: root.tracking && !root.vertical ? 9 : 6
-    foreground: root.tracking ? root.barActiveColor : Qt.darker(root.bar ? root.bar.barForeground : Color.foreground, 1.5)
+    fixedWidth: -1
+    horizontalMargin: root.vertical ? 6 : 9
+    foreground: root.tracking ? root.barActiveColor : Qt.darker(root.bar ? root.bar.barForeground : Color.foreground, 1.25)
     tooltipText: root.tracking
       ? root.projectName + " · " + Model.humanDuration(root.elapsed) + " · right-click to stop"
       : "Not tracking · right-click to start " + (root.punch && root.punch.lastProject ? root.punch.lastProject : "a project")
@@ -179,19 +183,26 @@ Panel {
       if (step !== 0) root.punch.cycle(step > 0 ? -1 : 1)
     }
 
-    // Behind the label: a tinted bed in the project's color, with a fill
-    // that crosses it once per hour of tracked time.
-    Rectangle {
+    // Behind the label: outlined while stopped, filled with the project's
+    // color while running, and a second fill that crosses the pill once per
+    // hour of tracked time.
+    BorderSurface {
+      id: bed
       z: -1
       anchors.centerIn: parent
       width: root.vertical ? Style.bar.iconSlot - Style.space(4) : parent.width - Style.space(2)
-      height: root.vertical ? Style.bar.iconSlot - Style.space(4) : Math.round(parent.height * 0.68)
+      height: root.vertical ? Style.bar.iconSlot - Style.space(4) : Math.round(parent.height * 0.72)
       radius: Math.max(Style.cornerRadius, height / 2)
-      visible: root.tracking
-      color: Util.alpha(root.barActiveColor, 0.14)
+      color: root.tracking ? Util.alpha(root.barActiveColor, 0.14) : "transparent"
+      borderSpec: root.tracking
+        ? Border.none()
+        : Border.controlSpec("normal", button.foreground, button.foreground)
       clip: true
 
+      Behavior on color { ColorAnimation { duration: 160 } }
+
       Rectangle {
+        visible: root.tracking
         height: parent.height
         width: Math.round(parent.width * root.hourFill)
         radius: parent.radius
