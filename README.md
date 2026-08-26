@@ -39,10 +39,9 @@ o.bind("SUPER + ALT + T", "Punch: switch project", "punch pick")
 
 ## The pill
 
-Stopped, it is an outlined pill naming the project one keypress would pick back
-up. Running, it fills with that project's color and carries the elapsed time,
-with a second fill creeping across once per hour of tracked time. Same shape in
-both states, so it never jumps around the bar when you start or stop.
+Stopped, it is a quiet glyph. Running, it becomes a pill in the project's color
+carrying the name and the elapsed time, with a second fill creeping across once
+per hour of tracked time.
 
 | Interaction | What it does |
 |---|---|
