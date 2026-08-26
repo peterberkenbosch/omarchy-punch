@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# Punch from the terminal. Every subcommand is one IPC call into the running
+# Omarchy shell, so the CLI and the bar pill are never two copies of the
+# truth that can drift — there is one clock, and this talks to it.
+
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: punch [command] [arguments]
+
+  punch                     what is running right now
+  punch start [text]        start tracking (defaults to the last project)
+  punch stop                stop and log the running entry
+  punch toggle              stop if running, otherwise resume the last project
+  punch discard             drop the running entry without logging it
+  punch trim <minutes>      cut the last N minutes off the running entry
+  punch next | prev         walk recent projects without stopping the clock
+  punch today               today's totals per project
+  punch week                this week's totals per project
+  punch csv [since]         export finished entries as CSV (since: YYYY-MM-DD)
+  punch projects            list known projects, most recent first
+  punch pick                open the quick switcher
+  punch panel               open the day panel
+
+The text given to `start` uses the quick switcher's grammar:
+
+  punch start acme
+  punch start "acme: pairing on the bar"
+  punch start "acme +45"
+  punch start "acme +45: writing the spec"
+USAGE
+}
+
+call() {
+  if ! command -v omarchy-shell >/dev/null 2>&1; then
+    echo "omarchy-shell is not on PATH" >&2
+    exit 1
+  fi
+  omarchy-shell punch "$@"
+}
+
+command=${1:-status}
+[[ $# -gt 0 ]] && shift
+
+case $command in
+-h | --help | help)
+  usage
+  ;;
+status)
+  call status
+  ;;
+start)
+  call start "${1-}"
+  ;;
+stop | toggle | discard | today | week | projects | pick | panel)
+  call "$command"
+  ;;
+trim)
+  [[ -n ${1-} ]] || {
+    echo "punch trim needs a number of minutes" >&2
+    exit 1
+  }
+  call trim "$1"
+  ;;
+next)
+  call next
+  ;;
+prev | previous)
+  call previous
+  ;;
+csv)
+  call csv "${1-}"
+  ;;
+*)
+  echo "Unknown command: $command" >&2
+  usage >&2
+  exit 1
+  ;;
+esac
