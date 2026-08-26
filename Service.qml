@@ -144,9 +144,13 @@ Item {
     if (!name) return "no project"
 
     var at = now()
+    // Switching projects finishes an entry, and a finished entry belongs on
+    // disk before anything else happens — persisting only the running state
+    // here left the one we just closed alive in memory alone.
+    var closed = false
     if (running) {
       if (running.project.toLowerCase() === name.toLowerCase()) return "already running"
-      stopAt(at)
+      closed = stopAt(at) !== null
     }
 
     var backdate = Math.max(0, Math.floor(Number(backdateMinutes) || 0)) * 60
@@ -155,6 +159,7 @@ Item {
 
     running = { project: name, note: String(note || ""), start: startAt }
     projects = Model.touchProject(projects, name, at)
+    if (closed) persistEntries()
     persistState()
     changed()
 
