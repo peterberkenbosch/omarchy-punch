@@ -10,6 +10,11 @@ runs out, so "what am I on and for how long" costs a glance. Starting the clock
 on the thing you were doing an hour ago is one keypress; starting it on
 something new is a keypress and a few letters.
 
+![The Punch pill in the bar, running and stopped](docs/pill.png)
+
+Running and stopped: the pill carries the project and the clock while it runs,
+and collapses to a quiet glyph when it does not.
+
 ## Install
 
 Punch is one plugin wearing three hats. The **service** owns the clock, the
@@ -70,6 +75,8 @@ typeable. A backdate can never reach behind the last logged entry — Punch clip
 it to that boundary and says so, rather than quietly double-billing the overlap.
 
 ## The day panel
+
+![The Punch day panel](docs/panel.png)
 
 Left-click the pill. The strip across the top is the shape of the day, one band
 per project, gaps shown as gaps so you can see what you failed to track. Below
