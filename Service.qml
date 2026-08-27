@@ -550,7 +550,11 @@ Item {
     if (!payload.length) return "nothing to sync"
 
     syncing = true
+    // Clear the old failure as the new attempt starts, or `punch sync status`
+    // reports a stale reason while a run is still in flight.
+    lastSyncError = ""
     syncRetry.stop()
+    syncWatchdog.restart()
     syncProcess.payload = JSON.stringify(payload)
     syncProcess.command = [syncHelper, "push"]
     syncProcess.running = true
@@ -559,6 +563,7 @@ Item {
 
   function applySyncRun(exitCode, out, err) {
     syncing = false
+    syncWatchdog.stop()
 
     var results = null
     try { results = JSON.parse(String(out || "")) } catch (e) { results = null }
@@ -628,6 +633,21 @@ Item {
     onTriggered: root.runSync()
   }
 
+  // A push that never comes back would otherwise leave syncing stuck true and
+  // no further attempt ever scheduled — which is exactly what a helper
+  // waiting forever on stdin did. Kill it and treat it as a failure so the
+  // backoff takes over.
+  Timer {
+    id: syncWatchdog
+    interval: 120000
+    repeat: false
+    onTriggered: {
+      if (!root.syncing) return
+      syncProcess.running = false
+      root.applySyncRun(1, "", "the Moneybird push did not finish within two minutes")
+    }
+  }
+
   Timer {
     id: syncRetry
     interval: 60000
@@ -647,7 +667,12 @@ Item {
     onStarted: {
       write(payload + "\n")
       payload = ""
-      stdinEnabled = false
+      // Closing stdin is what gives the child its EOF, and there is no
+      // closeStdin in this Quickshell — dropping stdinEnabled is the only
+      // lever. Doing it in the same handler as the write closed the channel
+      // before the write flushed, so the helper sat on `cat` forever and the
+      // sync never came back. One turn of the event loop is enough.
+      Qt.callLater(function() { syncProcess.stdinEnabled = false })
     }
     stdout: StdioCollector { id: syncStdout; waitForEnd: true }
     stderr: StdioCollector { id: syncStderr; waitForEnd: true }
