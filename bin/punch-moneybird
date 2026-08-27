@@ -58,8 +58,30 @@ require_cli() {
   command -v "$CLI" >/dev/null 2>&1 ||
     die "moneybird-cli is not on PATH. Install it: curl -fsSL https://raw.githubusercontent.com/moneybird/moneybird-cli/main/install.sh | bash"
   command -v jq >/dev/null 2>&1 || die "jq is required"
+  # `administration current` only reads local config, so it says "logged in"
+  # for a token the API has since rejected. Whether the token still works is
+  # a question only the API can answer.
   "$CLI" administration current >/dev/null 2>&1 ||
     die "moneybird-cli is not logged in. Run: moneybird-cli login <token>"
+}
+
+# Every API read goes through here so a failure arrives as the reason it
+# happened rather than as an empty list. moneybird-cli reports auth trouble on
+# stdout and can still exit 0, so the text has to be inspected as well.
+api() {
+  local out status
+  out=$("$CLI" "$@" --output raw 2>&1)
+  status=$?
+  if ((status != 0)) || [[ $out == Error:* ]]; then
+    local reason
+    reason=$(tr '\n' ' ' <<<"$out" | sed 's/  */ /g' | cut -c1-220)
+    case $reason in
+    *"Authentication failed"* | *"refresh token"*)
+      die "Moneybird rejected the token. Create a new one under Settings > External applications and AI connections, then: moneybird-cli login <token>" ;;
+    *) die "moneybird-cli $1 $2 failed: $reason" ;;
+    esac
+  fi
+  printf '%s' "$out"
 }
 
 config_json() {
@@ -82,7 +104,7 @@ resolve_user_id() {
   fi
 
   local users count
-  users=$("$CLI" users list --output raw 2>/dev/null) || return 1
+  users=$(api users list)
   count=$(jq '[.[] | select((.permissions // []) | index("time_entries"))] | length' <<<"$users" 2>/dev/null)
   if [[ ${count:-0} == 1 ]]; then
     jq -r '[.[] | select((.permissions // []) | index("time_entries"))][0].id' <<<"$users"
@@ -97,13 +119,13 @@ resolve_user_id() {
 }
 
 fetch_projects() {
-  "$CLI" projects list --output raw 2>/dev/null || echo '[]'
+  api projects list
 }
 
 find_contact_id() {
   local name="$1"
   [[ -n $name ]] || return 1
-  "$CLI" contacts list --query "$name" --output raw 2>/dev/null |
+  api contacts list --query "$name" |
     jq -r --arg n "$name" '
       [ .[] | select(((.company_name // "") | ascii_downcase) == ($n | ascii_downcase)
                   or (((.firstname // "") + " " + (.lastname // "")) | ltrimstr(" ") | rtrimstr(" ") | ascii_downcase) == ($n | ascii_downcase)) ]
@@ -117,7 +139,7 @@ case "${1:-}" in
   ;;
 contacts)
   require_cli
-  "$CLI" contacts list --output raw | jq -r '.[] | "\(.id)\t\(.company_name // ((.firstname // "") + " " + (.lastname // "")))"'
+  api contacts list | jq -r '.[] | "\(.id)\t\(.company_name // ((.firstname // "") + " " + (.lastname // "")))"'
   exit 0
   ;;
 projects)
@@ -128,10 +150,16 @@ projects)
 doctor)
   require_cli
   echo "administration: $("$CLI" administration current 2>&1 | head -1)"
+  # Proves the token before reporting anything that depends on it, so a dead
+  # token reads as a dead token instead of an account with no projects.
+  api users list >/dev/null
   if user_id=$(resolve_user_id); then
     echo "user id:        $user_id"
   else
-    echo "user id:        UNRESOLVED — set \"userId\" in $CONFIG" >&2
+    echo "user id:        UNRESOLVED — more than one candidate; set \"userId\" in $CONFIG"
+    echo
+    echo "Users who can track time:"
+    api users list | jq -r '.[] | select((.permissions // []) | index("time_entries")) | "  \(.id)  \(.name // .email // "?")"'
   fi
   echo "config:         $CONFIG$([[ -f $CONFIG ]] || echo ' (missing, defaults apply)')"
   echo
@@ -149,6 +177,12 @@ esac
 # ---------------------------------------------------------------- push
 
 require_cli
+
+# Prove the token before anything else runs. resolve_user_id and the mapping
+# lookups all happen inside command substitutions, where `die` only kills the
+# subshell — so an auth failure discovered down there surfaced twice: once as
+# itself, and once as whatever the caller made of the empty result.
+api users list >/dev/null
 
 if [[ -n ${2:-} ]]; then
   [[ -f $2 ]] || die "no such file: $2"
