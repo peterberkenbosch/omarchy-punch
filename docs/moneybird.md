@@ -33,10 +33,22 @@ moneybird-cli --version
 In Moneybird: **Settings → External applications and AI connections → New API
 token**.
 
-The token needs the `time_entries` scope. Moneybird also requires the API user
-to have sales-invoice access for this endpoint, which its own docs state on the
-create call — a token with only `time_entries` will be accepted at login and
-then refused at the first push.
+The token needs three scopes:
+
+| Scope | Why |
+|---|---|
+| `time_entries` | writing the entries themselves |
+| `sales_invoices` | Moneybird requires it on the time-entry create call |
+| `settings` | reading the project and user lists, which is how Punch decides where time goes |
+
+`settings` is the one that catches people out. Without it the token is perfectly
+valid, writes time entries happily, and still cannot read the two lists needed
+to work out which project an entry belongs to — and Moneybird reports that as a
+plain 401, the same answer it gives for a token it has never seen.
+
+A token is also accepted at login without any of this being checked: `login`
+only writes local config and never calls the API. `punch-moneybird doctor`
+prints exactly which endpoints your token can reach.
 
 Then log in. Do this yourself rather than pasting the token into a script or a
 chat window:
@@ -160,6 +172,8 @@ on its own.
 |---|---|
 | `moneybird sync is off` | `moneybirdSync` is not `true` on the bar entry in `shell.json`. |
 | `moneybird-cli is not logged in` | Run `moneybird-cli login <token>`. |
+| `Moneybird refused to list projects` (or `users`) | The token is valid but lacks the `settings` scope. Create a new one with all three scopes. |
+| `Moneybird rejected the token` | The token itself is not accepted. Create a new one. |
 | `could not work out which Moneybird user to book time for` | More than one candidate user. Run `punch-moneybird doctor`, then set `userId` in the mapping file. |
 | `no Moneybird project named "x"` | Either rename the Punch project to match, or map it. `punch-moneybird projects` lists the real names. |
 | `no Moneybird contact matches "x"` | The `contact` in your mapping is not an exact company or full name. `punch-moneybird contacts` lists them. |

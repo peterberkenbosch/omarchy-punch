@@ -153,7 +153,7 @@ up to it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moneybird/moneybird-cli/main/install.sh | bash
-moneybird-cli login <token>                       # scope: time_entries
+moneybird-cli login <token>       # scopes: time_entries, sales_invoices, settings
 ```
 
 Then set `moneybirdSync` to `true` on the Punch entry in `shell.json`, and map

@@ -75,7 +75,14 @@ api() {
   if ((status != 0)) || [[ $out == Error:* ]]; then
     local reason
     reason=$(tr '\n' ' ' <<<"$out" | sed 's/  */ /g' | cut -c1-220)
-    case $reason in
+    case "$reason:$1" in
+    # Moneybird answers 401 both for a token it does not know and for one that
+    # is fine but not allowed here, and moneybird-cli reports them
+    # identically. Users and projects live behind `settings`, so a token that
+    # can happily write time entries still cannot read the two lists needed to
+    # decide where they go.
+    *"Authentication failed"*:users | *"Authentication failed"*:projects | *"refresh token"*:users | *"refresh token"*:projects)
+      die "Moneybird refused to list $1. A personal token needs the 'settings' scope to read users and projects, alongside 'time_entries' and 'sales_invoices'. Create a new token with all three and run: moneybird-cli login <token>" ;;
     *"Authentication failed"* | *"refresh token"*)
       die "Moneybird rejected the token. Create a new one under Settings > External applications and AI connections, then: moneybird-cli login <token>" ;;
     *) die "moneybird-cli $1 $2 failed: $reason" ;;
@@ -150,6 +157,29 @@ projects)
 doctor)
   require_cli
   echo "administration: $("$CLI" administration current 2>&1 | head -1)"
+
+  # Which endpoints the token may read, one line each. A token can be
+  # perfectly valid and still be missing exactly the scope this needs, and
+  # that difference is invisible in the error moneybird-cli passes on.
+  echo
+  echo "Access:"
+  scope_missing=0
+  for resource in contacts time_entries projects users; do
+    if "$CLI" "$resource" list --output raw >/dev/null 2>&1; then
+      printf '  %-14s ok\n' "$resource"
+    else
+      printf '  %-14s no\n' "$resource"
+      [[ $resource == projects || $resource == users ]] && scope_missing=1
+    fi
+  done
+  if ((scope_missing)); then
+    echo
+    echo "Punch needs to read projects and users to decide where time goes." >&2
+    echo "Those live behind Moneybird's 'settings' scope. Create a token with" >&2
+    echo "'settings', 'time_entries', and 'sales_invoices', then log in again." >&2
+    exit 1
+  fi
+  echo
   # Proves the token before reporting anything that depends on it, so a dead
   # token reads as a dead token instead of an account with no projects.
   api users list >/dev/null
