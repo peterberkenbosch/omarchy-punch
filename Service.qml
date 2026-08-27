@@ -90,6 +90,7 @@ Item {
 
   readonly property int idleThresholdSec: intSetting("idleThresholdSec", 900, 0, 7200)
   readonly property int roundToMinutes: intSetting("roundToMinutes", 0, 0, 60)
+  readonly property bool syncEnabled: setting("moneybirdSync", false) === true
 
   // ------------------------------------------------------------- live views
 
@@ -169,7 +170,7 @@ Item {
 
     running = { project: name, note: String(note || ""), start: startAt }
     projects = Model.touchProject(projects, name, at)
-    if (closed) persistEntries()
+    if (closed) { persistEntries(); scheduleSync() }
     persistState()
     changed()
 
@@ -211,6 +212,7 @@ Item {
     var entry = stopAt(now())
     persistAll()
     changed()
+    scheduleSync()
     if (!entry) return "discarded " + was + " (under a second)"
     return was + " " + Model.clockDuration(Model.entrySeconds(entry))
   }
@@ -488,6 +490,142 @@ Item {
     ])
   }
 
+  // ------------------------------------------------------------- moneybird
+
+  // Entries are pushed to Moneybird by bin/punch-moneybird, a plain script
+  // that shells out to the official moneybird-cli. Nothing about the network
+  // lives in here: this half decides *when* to push and remembers what came
+  // back, so a sync that goes wrong can still be run and read from a
+  // terminal.
+  readonly property string syncHelper: sourceDir ? sourceDir + "/bin/punch-moneybird" : ""
+  readonly property var unsynced: Model.unsyncedEntries(entries)
+  readonly property int pendingSync: unsynced.length
+
+  property bool syncing: false
+  property string lastSyncError: ""
+  property int lastSyncAt: 0
+  property int syncFailures: 0
+  property bool syncProblemNotified: false
+
+  function scheduleSync() {
+    if (!syncEnabled) return
+    syncDebounce.restart()
+  }
+
+  function runSync() {
+    if (!syncEnabled) return "moneybird sync is off"
+    if (!loaded || !syncHelper) return "not ready"
+    if (syncing) return "already syncing"
+    var payload = Model.syncPayload(unsynced)
+    if (!payload.length) return "nothing to sync"
+
+    syncing = true
+    syncRetry.stop()
+    syncProcess.payload = JSON.stringify(payload)
+    syncProcess.command = [syncHelper, "push"]
+    syncProcess.running = true
+    return "pushing " + payload.length + (payload.length === 1 ? " entry" : " entries")
+  }
+
+  function applySyncRun(exitCode, out, err) {
+    syncing = false
+
+    var results = null
+    try { results = JSON.parse(String(out || "")) } catch (e) { results = null }
+
+    // Whatever did land is recorded even when the run as a whole failed, so a
+    // partial push is never repeated against the entries that got through.
+    if (Array.isArray(results) && results.length) {
+      entries = Model.applySyncResults(entries, results, now())
+      persistEntries()
+      changed()
+    }
+
+    var failed = exitCode !== 0
+    var perEntry = Array.isArray(results) ? Model.syncErrors(results) : []
+    if (failed) {
+      lastSyncError = String(err || out || "moneybird sync failed").replace(/\s+/g, " ").trim().substring(0, 200)
+    } else if (perEntry.length) {
+      lastSyncError = perEntry[0]
+    } else {
+      lastSyncError = ""
+    }
+
+    if (lastSyncError) {
+      syncFailures++
+      // Back off 1, 2, 4 ... minutes so a token that needs re-issuing is not
+      // retried into the ground, capped so it still recovers on its own.
+      syncRetry.interval = Math.min(30 * 60000, 60000 * Math.pow(2, Math.min(5, syncFailures - 1)))
+      syncRetry.restart()
+      // One notification per run of bad luck, not one per attempt.
+      if (syncFailures >= 3 && !syncProblemNotified) {
+        syncProblemNotified = true
+        notifySyncProblem()
+      }
+      return
+    }
+
+    syncFailures = 0
+    syncProblemNotified = false
+    lastSyncAt = now()
+    // A run that cleared some but not all of the backlog goes again.
+    if (pendingSync > 0) syncDebounce.restart()
+  }
+
+  function notifySyncProblem() {
+    Quickshell.execDetached([
+      omarchyPath + "/bin/omarchy-notification-send",
+      "-u", "normal",
+      "-g", "󰥔",
+      pendingSync + (pendingSync === 1 ? " entry" : " entries") + " not in Moneybird",
+      lastSyncError,
+      "--exec", cliPath, "sync"
+    ])
+  }
+
+  function syncStatus() {
+    if (!syncEnabled) return "moneybird sync is off"
+    var lines = [pendingSync + " waiting" + (syncing ? ", syncing now" : "")]
+    if (lastSyncAt) lines.push("last synced " + Model.clockTime(lastSyncAt))
+    if (lastSyncError) lines.push("last error: " + lastSyncError)
+    return lines.join("\n")
+  }
+
+  Timer {
+    id: syncDebounce
+    interval: 3000
+    repeat: false
+    onTriggered: root.runSync()
+  }
+
+  Timer {
+    id: syncRetry
+    interval: 60000
+    repeat: false
+    onTriggered: root.runSync()
+  }
+
+  // Anything left over from a previous session goes out once the log is in.
+  onLoadedChanged: if (loaded) scheduleSync()
+
+  Process {
+    id: syncProcess
+    property string payload: ""
+    stdinEnabled: true
+    running: false
+    command: []
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+      stdinEnabled = false
+    }
+    stdout: StdioCollector { id: syncStdout; waitForEnd: true }
+    stderr: StdioCollector { id: syncStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.applySyncRun(exitCode, syncStdout.text, syncStderr.text)
+    }
+  }
+
   // ------------------------------------------------------------- ipc
 
   // One target for the CLI and for anything else that wants to drive the
@@ -511,6 +649,8 @@ Item {
       for (var i = 0; i < root.projects.length; i++) names.push(root.projects[i].name)
       return names.join("\n")
     }
+    function sync(): string { return root.runSync() }
+    function syncstatus(): string { return root.syncStatus() }
     function pick(): string { return root.openQuickSwitch() ? "ok" : "no overlay" }
     function panel(): string { return root.openPanel() ? "ok" : "no bar widget" }
   }

@@ -127,6 +127,82 @@ judgement call, so it asks.
 
 Set `idleThresholdSec` to `0` to turn it off.
 
+## Moneybird
+
+Finished entries can be pushed to [Moneybird](https://www.moneybird.com) through
+its official CLI. Stopping the clock sends the entry; anything that fails
+because you were offline or your token expired stays queued and is retried with
+a widening backoff, so the log on disk is always the truth and Moneybird catches
+up to it.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moneybird/moneybird-cli/main/install.sh | bash
+moneybird-cli login <token>          # Settings > External applications and AI connections
+```
+
+The token needs the `time_entries` scope, and Moneybird also wants the API user
+to have sales-invoice access for this endpoint. Turn the push on by setting
+`moneybirdSync` to `true` on the bar entry in `shell.json`.
+
+### Mapping
+
+`~/.config/punch/moneybird.json` decides where time lands:
+
+```json
+{
+  "userId": "",
+  "defaultBillable": true,
+  "projects": {
+    "admin":    { "billable": false, "project": null },
+    "acme-web": { "project": "Acme website", "contact": "Acme Corp" }
+  }
+}
+```
+
+A Punch project with no entry here is matched against your Moneybird projects by
+name, so calling one `fizzy` on both sides is all the configuration it needs.
+Everything else is a line in this file:
+
+| Key | |
+|---|---|
+| `project` | the Moneybird project name to use instead of the Punch one; `null` books the time with no project |
+| `contact` | the Moneybird contact to attach, matched on company or full name |
+| `billable` | overrides `defaultBillable` for this project |
+| `userId` | whose time this is; resolved automatically when the administration has one person who can track time |
+
+A Punch project that matches no Moneybird project and has no mapping is
+**refused, not guessed**. Booking it anyway would put billable time against no
+project at all, which is the kind of thing you find out about on an invoice. The
+entry stays queued and says what to map.
+
+### Checking and driving it
+
+```bash
+punch sync                  # push anything not yet in Moneybird
+punch sync status           # how far behind the push is
+punch-moneybird doctor      # login, resolved user, and your Moneybird projects
+punch-moneybird projects    # ids and names
+punch-moneybird contacts    # ids and names
+```
+
+The day panel shows `n entries waiting to sync` while there is a backlog, and
+puts a tick on every row that has reached Moneybird. Three failures in a row
+raise one notification whose click retries.
+
+The push itself is [`bin/punch-moneybird`](bin/punch-moneybird), a plain script
+the shell shells out to. Nothing about the network lives inside the QML: a sync
+that goes wrong can be run, read, and argued with from a terminal.
+
+### What it does not do
+
+Entries are only ever **created**. Editing a duration or deleting an entry after
+it has synced does not propagate — Moneybird keeps the original, and the tick in
+the panel is how you tell which rows are already committed. Fix those in
+Moneybird, or delete there and let the entry re-sync.
+
+Entries shorter than a minute are never sent: Moneybird rounds to whole minutes
+and needs at least one, so they are marked settled rather than queued forever.
+
 ## Settings
 
 Inline on the bar entry in `~/.config/omarchy/shell.json`:
@@ -139,6 +215,7 @@ Inline on the bar entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `idleThresholdSec` | `900` | ask about idle time after this long; `0` disables |
 | `roundToMinutes` | `0` | round finished entries **up** to the next N minutes |
+| `moneybirdSync` | `false` | push finished entries to Moneybird (see above) |
 | `showProjectName` | `true` | show the project name in the bar, not just the time |
 | `hideWhenStopped` | `false` | hide the pill entirely when nothing is running |
 
@@ -173,8 +250,8 @@ node test/model-test.js
 
 ## Not in this version
 
-- No Toggl or Harvest sync. The local loop comes first; the manifest already
-  carries typed settings, which is where a sync backend would hang.
+- No Toggl or Harvest sync. Moneybird is the one backend so far; the shape it
+  uses — a script the service shells out to — is where another would hang.
 - No pause on lock. Idle detection covers the real case.
 - Entries are edited in 5-minute steps, not by dragging their edges.
 

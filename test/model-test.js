@@ -55,6 +55,10 @@ check("parseEntries preserves note", M.parseEntries(text)[1].note, "spec")
 check("sanitizeEntry rejects zero length", M.sanitizeEntry({ project: "x", start: 5, end: 5 }), null)
 check("sanitizeEntry rejects nameless", M.sanitizeEntry({ project: " ", start: 1, end: 5 }), null)
 
+check("clipping keeps the sync marker",
+  M.entriesInRange([{ id: "s", project: "acme", note: "", start: day + 9 * 3600, end: day + 10 * 3600, moneybird: { id: "9", syncedAt: 1 } }],
+    day, M.dayEnd(day))[0].moneybird.id, "9")
+
 // Quick input grammar
 check("parse plain", M.parseQuickInput("acme"), { project: "acme", note: "", backdateMinutes: 0 })
 check("parse note", M.parseQuickInput("acme: pairing on the bar"), { project: "acme", note: "pairing on the bar", backdateMinutes: 0 })
@@ -84,6 +88,32 @@ check("hue is stable", M.projectHue("acme"), M.projectHue("ACME"))
 var csv = M.toCsv([{ id: "a", project: "ac,me", note: 'say "hi"', start: day + 9 * 3600, end: day + 10 * 3600 }])
 check("csv header", csv.split("\n")[0], "date,start,end,project,note,seconds,hours")
 check("csv quoting", csv.split("\n")[1], '2026-08-26,09:00,10:00,"ac,me","say ""hi""",3600,1.00')
+
+// Sync bookkeeping
+var pending = [
+  { id: "a", project: "fizzy", note: "n", start: 100, end: 4000 },
+  { id: "b", project: "admin", note: "", start: 4000, end: 4030 },
+  { id: "c", project: "acme", note: "", start: 5000, end: 9000, moneybird: { id: "999", syncedAt: 12 } }
+]
+check("unsynced skips what is done", M.unsyncedEntries(pending).map(function(e) { return e.id }), ["a", "b"])
+check("payload stays narrow", Object.keys(M.syncPayload(pending)[0]).sort(), ["end", "id", "note", "project", "start"])
+
+var applied = M.applySyncResults(pending, [
+  { id: "a", moneybirdId: "4965", skipped: false, error: null },
+  { id: "b", moneybirdId: null, skipped: true, error: "shorter than a minute" }
+], 777)
+check("success records the id", applied[0].moneybird, { syncedAt: 777, id: "4965" })
+check("skipped settles too", applied[1].moneybird, { syncedAt: 777, skipped: true, reason: "shorter than a minute" })
+check("nothing owed after", M.unsyncedEntries(applied).length, 0)
+
+// A failure records nothing, so the entry stays owed and the next run retries.
+var failed = M.applySyncResults(pending, [{ id: "a", moneybirdId: null, skipped: false, error: "offline" }], 777)
+check("failure leaves it owed", M.unsyncedEntries(failed).map(function(e) { return e.id }), ["a", "b"])
+check("failures are reported", M.syncErrors([{ id: "a", error: "offline" }, { id: "b", skipped: true, error: "too short" }]), ["offline"])
+
+// Sync state survives the file round trip.
+check("sync survives serialization", M.parseEntries(M.serializeEntries(applied))[0].moneybird.id, "4965")
+check("garbage sync state is dropped", M.sanitizeEntry({ project: "x", start: 1, end: 99, moneybird: {} }).moneybird, undefined)
 
 // Status
 check("status stopped", M.statusLine(null, 0), "stopped")

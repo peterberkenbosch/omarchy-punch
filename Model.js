@@ -100,19 +100,108 @@ function newId(startSeconds, project, salt) {
   return Math.floor(startSeconds).toString(36) + "-" + hashString(project + "|" + salt).toString(36)
 }
 
+// What a successful push to an external tracker left behind. An entry that
+// carries one is done; an entry that does not is still owed. `skipped` is a
+// settled outcome too — an entry the other side can never represent must
+// stop asking to be sent, or it queues forever.
+function sanitizeSync(raw) {
+  if (!isPlainObject(raw)) return null
+  var id = String(raw.id || "")
+  var skipped = raw.skipped === true
+  if (!id && !skipped) return null
+  var out = { syncedAt: Math.floor(Number(raw.syncedAt)) || 0 }
+  if (id) out.id = id
+  if (skipped) out.skipped = true
+  if (raw.reason) out.reason = String(raw.reason)
+  return out
+}
+
 function sanitizeEntry(raw) {
   if (!isPlainObject(raw)) return null
   var start = Math.floor(Number(raw.start))
   var end = Math.floor(Number(raw.end))
   var project = String(raw.project || "").trim()
   if (!project || !isFinite(start) || !isFinite(end) || end <= start) return null
-  return {
+  var out = {
     id: String(raw.id || newId(start, project, end)),
     project: project,
     note: String(raw.note || ""),
     start: start,
     end: end
   }
+  var sync = sanitizeSync(raw.moneybird)
+  if (sync) out.moneybird = sync
+  return out
+}
+
+function isSynced(entry) {
+  return !!(entry && entry.moneybird)
+}
+
+function unsyncedEntries(entries) {
+  var out = []
+  for (var i = 0; i < entries.length; i++) {
+    if (!isSynced(entries[i])) out.push(entries[i])
+  }
+  return out
+}
+
+// Only the fields the pusher needs. Keeping the payload narrow means a change
+// to how entries are stored does not silently change what leaves the machine.
+function syncPayload(entries) {
+  var out = []
+  for (var i = 0; i < entries.length; i++) {
+    out.push({
+      id: entries[i].id,
+      project: entries[i].project,
+      note: entries[i].note,
+      start: entries[i].start,
+      end: entries[i].end
+    })
+  }
+  return out
+}
+
+// Fold the pusher's per-entry results back into the log. A result without an
+// id and without `skipped` is a failure: it records nothing, so the entry
+// stays owed and the next run picks it up again.
+function applySyncResults(entries, results, atSeconds) {
+  var byId = {}
+  for (var r = 0; r < (results || []).length; r++) {
+    var result = results[r]
+    if (isPlainObject(result) && result.id) byId[String(result.id)] = result
+  }
+  var out = []
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i]
+    var hit = byId[entry.id]
+    if (!hit || (!hit.moneybirdId && hit.skipped !== true)) {
+      out.push(entry)
+      continue
+    }
+    var copy = {
+      id: entry.id, project: entry.project, note: entry.note,
+      start: entry.start, end: entry.end
+    }
+    copy.moneybird = sanitizeSync({
+      id: hit.moneybirdId || "",
+      skipped: hit.skipped === true,
+      reason: hit.skipped === true ? (hit.error || "") : "",
+      syncedAt: atSeconds
+    })
+    if (!copy.moneybird) delete copy.moneybird
+    out.push(copy)
+  }
+  return out
+}
+
+function syncErrors(results) {
+  var out = []
+  for (var i = 0; i < (results || []).length; i++) {
+    var result = results[i]
+    if (isPlainObject(result) && result.error && result.skipped !== true) out.push(result.error)
+  }
+  return out
 }
 
 function parseEntries(text) {
@@ -150,6 +239,8 @@ function clipToRange(entry, from, to) {
   if (end <= start) return null
   var copy = { id: entry.id, project: entry.project, note: entry.note, start: start, end: end }
   copy.clipped = start !== entry.start || end !== entry.end
+  // Carried through so the panel can mark what is already booked elsewhere.
+  if (entry.moneybird) copy.moneybird = entry.moneybird
   return copy
 }
 
@@ -380,7 +471,13 @@ if (typeof module !== "undefined") {
     roundedEnd: roundedEnd,
     hashString: hashString,
     newId: newId,
+    sanitizeSync: sanitizeSync,
     sanitizeEntry: sanitizeEntry,
+    isSynced: isSynced,
+    unsyncedEntries: unsyncedEntries,
+    syncPayload: syncPayload,
+    applySyncResults: applySyncResults,
+    syncErrors: syncErrors,
     parseEntries: parseEntries,
     serializeEntries: serializeEntries,
     entrySeconds: entrySeconds,

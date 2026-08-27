@@ -23,6 +23,8 @@ Usage: punch [command] [arguments]
   punch projects            list known projects, most recent first
   punch pick                open the quick switcher
   punch panel               open the day panel
+  punch sync                push anything not yet in Moneybird
+  punch sync status         how far behind the Moneybird push is
 
 The text given to `start` uses the quick switcher's grammar:
 
@@ -56,6 +58,13 @@ start)
   ;;
 stop | toggle | discard | today | week | projects | pick | panel)
   call "$command"
+  ;;
+sync)
+  if [[ ${1-} == "status" ]]; then
+    call syncstatus
+  else
+    call sync
+  fi
   ;;
 trim)
   [[ -n ${1-} ]] || {

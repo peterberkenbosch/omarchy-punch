@@ -21,14 +21,19 @@
     "displayName": "Punch",
     "description": "Running timer in the bar. Left opens the day panel, right starts or stops, middle opens the quick switcher, scroll cycles recent projects.",
     "category": "Time",
-    "aliases": ["punch", "timer", "time-tracking"],
+    "aliases": [
+      "punch",
+      "timer",
+      "time-tracking"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "idleThresholdSec": 900,
       "hideWhenStopped": false,
       "showProjectName": true,
-      "roundToMinutes": 0
+      "roundToMinutes": 0,
+      "moneybirdSync": false
     },
     "schema": [
       {
@@ -62,6 +67,13 @@
         "step": 5,
         "defaultValue": 0,
         "description": "0 keeps exact durations. 15 rounds every stopped entry up to the next quarter hour."
+      },
+      {
+        "key": "moneybirdSync",
+        "type": "boolean",
+        "label": "Push finished entries to Moneybird",
+        "defaultValue": false,
+        "description": "Needs moneybird-cli installed and logged in. Mapping lives in ~/.config/punch/moneybird.json."
       }
     ]
   }

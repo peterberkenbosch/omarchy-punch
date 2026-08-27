@@ -393,6 +393,21 @@ Panel {
             Total { label: "THIS WEEK"; seconds: root.punch ? root.punch.weekSeconds : 0 }
           }
 
+          Text {
+            width: parent.width
+            visible: !!root.punch && root.punch.syncEnabled && root.punch.pendingSync > 0
+            text: {
+              if (!root.punch) return ""
+              var n = root.punch.pendingSync
+              var line = n + (n === 1 ? " entry" : " entries") + " waiting to sync"
+              return root.punch.syncing ? line + " · syncing" : line
+            }
+            color: root.punch && root.punch.lastSyncError ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
           PanelSeparator { foreground: root.foreground }
 
           // ---- per-project totals for today
@@ -611,6 +626,21 @@ Panel {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      Text {
+        Layout.alignment: Qt.AlignVCenter
+        visible: !!(entryRow.entry && entryRow.entry.moneybird && entryRow.entry.moneybird.id)
+        text: "󰄬"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        PanelToolTip {
+          visible: syncedHover.containsMouse
+          text: "In Moneybird"
+          fontFamily: root.fontFamily
+        }
+        MouseArea { id: syncedHover; anchors.fill: parent; hoverEnabled: true }
       }
 
       Text {
