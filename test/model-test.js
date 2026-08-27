@@ -106,6 +106,13 @@ check("success records the id", applied[0].moneybird, { syncedAt: 777, id: "4965
 check("skipped settles too", applied[1].moneybird, { syncedAt: 777, skipped: true, reason: "shorter than a minute" })
 check("nothing owed after", M.unsyncedEntries(applied).length, 0)
 
+// Editing an entry must never change whether it has been sent.
+var booked = { id: "z", project: "acme", note: "old", start: 10, end: 3610, moneybird: { id: "77", syncedAt: 5 } }
+check("edit keeps the sync marker", M.editedEntry(booked, { note: "new" }).moneybird, { id: "77", syncedAt: 5 })
+check("edit applies the change", M.editedEntry(booked, { note: "new" }).note, "new")
+check("edit of an unsent entry stays unsent", M.editedEntry({ id: "y", project: "a", note: "", start: 1, end: 61 }, { end: 121 }).moneybird, undefined)
+check("edited entry is still owed or not accordingly", M.unsyncedEntries([M.editedEntry(booked, { end: 7200 })]).length, 0)
+
 // A failure records nothing, so the entry stays owed and the next run retries.
 var failed = M.applySyncResults(pending, [{ id: "a", moneybirdId: null, skipped: false, error: "offline" }], 777)
 check("failure leaves it owed", M.unsyncedEntries(failed).map(function(e) { return e.id }), ["a", "b"])

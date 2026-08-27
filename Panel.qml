@@ -67,23 +67,47 @@ Panel {
 
   property int cursor: 0
   property bool cursorActive: false
-  property bool editingNote: false
+  // Which note is open for editing: "" for none, "running" for the one under
+  // the clock, or an entry id for a row further down. One property rather
+  // than a flag per place, so two fields can never be open at once.
+  property string editingId: ""
 
-  // The note line under the clock is where the description already shows, so
-  // it is where you write it. No dialog, no second panel: click the line, or
-  // press d, and the same text becomes a field.
-  function beginNoteEdit() {
-    if (!tracking) return
-    editingNote = true
+  // The note line is where the description already shows, so it is where you
+  // write it. No dialog, no second panel: click the line, or press d, and the
+  // same text becomes a field.
+  function noteTarget() {
+    if (cursorActive) {
+      var row = selectedRow()
+      if (row) return String(row.id)
+    }
+    return tracking ? "running" : ""
   }
 
-  function commitNote(text) {
-    if (punch) punch.setNote(text)
-    editingNote = false
+  function beginNoteEdit(id) {
+    var target = id ? String(id) : noteTarget()
+    if (!target) return
+    // The running stretch is edited in the hero whichever way you reach it,
+    // so there is one obvious place the current note lives.
+    editingId = target
+  }
+
+  function commitNote(id, text) {
+    if (punch) {
+      if (id === "running") punch.setNote(text)
+      else punch.setEntryNote(id, text)
+    }
+    endNoteEdit()
   }
 
   function cancelNoteEdit() {
-    editingNote = false
+    endNoteEdit()
+  }
+
+  // Closing the field is not enough: the keys have to come back with it, or
+  // the panel looks navigable and silently is not until you click something.
+  function endNoteEdit() {
+    editingId = ""
+    Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
   }
 
   readonly property var dayEntries: punch ? punch.todayEntries : []
@@ -161,7 +185,7 @@ Panel {
     registeredService.unregisterWidget(root)
 
   onOpenedChanged: if (opened) {
-    editingNote = false
+    editingId = ""
     cursorActive = false
     cursor = Math.max(0, rows.length - 1)
     if (panelFlick) panelFlick.contentY = 0
@@ -260,7 +284,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       // While the note field has the keys, j/k/x are letters, not commands.
-      blocked: root.editingNote
+      blocked: root.editingId !== ""
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -270,7 +294,7 @@ Panel {
       onDeleteRequested: root.deleteSelected()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "d" || t === "D") root.beginNoteEdit()
+        if (t === "d" || t === "D") root.beginNoteEdit("")
         else if (t === "s" || t === "S") root.toggleClock()
         else if (t === "p" || t === "P" || t === "n" || t === "N") root.openQuickSwitch()
         else if (t === "+" || t === "=") root.adjustSelected(5)
@@ -339,11 +363,12 @@ Panel {
                 Item {
                   Layout.fillWidth: true
                   visible: root.tracking
-                  implicitHeight: root.editingNote ? noteField.implicitHeight : noteText.implicitHeight
+                  readonly property bool editing: root.editingId === "running"
+                  implicitHeight: editing ? noteField.implicitHeight : noteText.implicitHeight
 
                   Text {
                     id: noteText
-                    visible: !root.editingNote
+                    visible: !parent.editing
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
@@ -358,13 +383,13 @@ Panel {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.IBeamCursor
-                      onClicked: root.beginNoteEdit()
+                      onClicked: root.beginNoteEdit("running")
                     }
                   }
 
                   TextField {
                     id: noteField
-                    visible: root.editingNote
+                    visible: parent.editing
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
@@ -378,7 +403,19 @@ Panel {
                       text = root.live && root.live.note ? root.live.note : ""
                       Qt.callLater(function() { noteField.forceActiveFocus(); noteField.selectAll() })
                     }
-                    onAccepted: root.commitNote(text)
+                    // Accepting the key matters as much as handling it: an
+                    // unaccepted Return bubbles up to the panel's key catcher,
+                    // which by then is unblocked and reads it as "resume the
+                    // selected row" — so committing a note also switched
+                    // projects.
+                    Keys.onReturnPressed: function(event) {
+                      root.commitNote("running", text)
+                      event.accepted = true
+                    }
+                    Keys.onEnterPressed: function(event) {
+                      root.commitNote("running", text)
+                      event.accepted = true
+                    }
                     Keys.onEscapePressed: function(event) {
                       root.cancelNoteEdit()
                       event.accepted = true
@@ -386,7 +423,7 @@ Panel {
                     // Clicking away is a commit, not a discard: the text you
                     // typed is what you meant, and losing it to a stray click
                     // would teach you not to trust the field.
-                    onActiveFocusChanged: if (!activeFocus && root.editingNote) root.commitNote(text)
+                    onActiveFocusChanged: if (!activeFocus && parent.editing) root.commitNote("running", text)
                   }
                 }
               }
@@ -528,8 +565,14 @@ Panel {
               bottomPadding: Style.space(8)
             }
 
+            // Only the finished entries go through the Repeater. The running
+            // stretch is re-derived every second, so including it handed the
+            // Repeater a new array on every tick and every delegate was
+            // destroyed and rebuilt — which quietly ate anything being typed
+            // into a row's note field. The finished rows change only when the
+            // log does, so these delegates now survive.
             Repeater {
-              model: root.rows
+              model: root.dayEntries
               EntryRow {
                 required property var modelData
                 required property int index
@@ -537,6 +580,13 @@ Panel {
                 entry: modelData
                 rowIndex: index
               }
+            }
+
+            EntryRow {
+              visible: !!root.liveEntry
+              width: rowColumn.width
+              entry: root.liveEntry
+              rowIndex: root.dayEntries.length
             }
           }
 
@@ -649,7 +699,7 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: { root.cursorActive = true; root.cursor = entryRow.rowIndex }
-      onClicked: root.activateCursor()
+      onClicked: if (root.editingId === "") root.activateCursor()
     }
 
     RowLayout {
@@ -683,17 +733,83 @@ Panel {
           elide: Text.ElideRight
         }
 
-        Text {
+        // Times stay put and only the note becomes a field, so the row does
+        // not reflow into something else the moment you click it.
+        Item {
           Layout.fillWidth: true
-          text: {
-            if (!entryRow.entry) return ""
-            var range = Model.clockTime(entryRow.entry.start) + "–" + (entryRow.live ? "now" : Model.clockTime(entryRow.entry.end))
-            return entryRow.entry.note ? range + "  " + entryRow.entry.note : range
+          readonly property bool editing: !entryRow.live && !!entryRow.entry && root.editingId === entryRow.entry.id
+          implicitHeight: editing ? rowNoteField.implicitHeight : rowMeta.implicitHeight
+
+          Row {
+            id: rowMeta
+            visible: !parent.editing
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+
+            Text {
+              id: rowRange
+              text: entryRow.entry
+                ? Model.clockTime(entryRow.entry.start) + "–" + (entryRow.live ? "now" : Model.clockTime(entryRow.entry.end))
+                : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: Math.max(0, rowMeta.width - rowRange.width - rowMeta.spacing)
+              text: entryRow.entry && entryRow.entry.note ? entryRow.entry.note : (entryRow.live ? "" : "add a note…")
+              opacity: entryRow.entry && entryRow.entry.note ? 1.0 : 0.45
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: entryRow.live ? Qt.PointingHandCursor : Qt.IBeamCursor
+                onClicked: {
+                  root.cursorActive = true
+                  root.cursor = entryRow.rowIndex
+                  root.beginNoteEdit(entryRow.live ? "running" : entryRow.entry.id)
+                }
+              }
+            }
           }
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+
+          TextField {
+            id: rowNoteField
+            visible: parent.editing
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            foreground: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            verticalPadding: Style.space(2)
+            placeholderText: "What was this?"
+
+            onVisibleChanged: if (visible) {
+              text = entryRow.entry && entryRow.entry.note ? entryRow.entry.note : ""
+              Qt.callLater(function() { rowNoteField.forceActiveFocus(); rowNoteField.selectAll() })
+            }
+            Keys.onReturnPressed: function(event) {
+              root.commitNote(entryRow.entry.id, text)
+              event.accepted = true
+            }
+            Keys.onEnterPressed: function(event) {
+              root.commitNote(entryRow.entry.id, text)
+              event.accepted = true
+            }
+            Keys.onEscapePressed: function(event) {
+              root.cancelNoteEdit()
+              event.accepted = true
+            }
+            onActiveFocusChanged: if (!activeFocus && parent.editing) root.commitNote(entryRow.entry.id, text)
+          }
         }
       }
 

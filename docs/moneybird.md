@@ -110,8 +110,12 @@ punch start "acme: checkout redesign"   # at the start
 punch note "checkout redesign"          # any time after
 ```
 
-or open the day panel and press `d`, or open the quick switcher and type a line
+or open the day panel and press `d` — on the running entry, or on any finished
+row you have moved the cursor to — or open the quick switcher and type a line
 that is nothing but a note: `: checkout redesign`.
+
+Editing the note on a row that already carries the sync tick changes it in Punch
+only. Moneybird keeps the description it was given.
 
 An entry with no note is sent with its Punch project name as the description, so
 nothing ever reaches Moneybird blank.

@@ -134,6 +134,23 @@ function sanitizeEntry(raw) {
   return out
 }
 
+// The single way to rewrite an entry. Editing one used to rebuild it field by
+// field, which quietly dropped the sync marker and made an already-booked
+// entry look owed again — so the next push sent a duplicate to Moneybird.
+// Changing an entry must never change whether it has been sent.
+function editedEntry(entry, changes) {
+  var out = {
+    id: entry.id,
+    project: entry.project,
+    note: entry.note,
+    start: entry.start,
+    end: entry.end
+  }
+  for (var key in (changes || {})) out[key] = changes[key]
+  if (entry.moneybird) out.moneybird = entry.moneybird
+  return out
+}
+
 function isSynced(entry) {
   return !!(entry && entry.moneybird)
 }
@@ -473,6 +490,7 @@ if (typeof module !== "undefined") {
     newId: newId,
     sanitizeSync: sanitizeSync,
     sanitizeEntry: sanitizeEntry,
+    editedEntry: editedEntry,
     isSynced: isSynced,
     unsyncedEntries: unsyncedEntries,
     syncPayload: syncPayload,

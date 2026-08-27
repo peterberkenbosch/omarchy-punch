@@ -82,11 +82,14 @@ it to that boundary and says so, rather than quietly double-billing the overlap.
 
 ![The Punch day panel](docs/panel.png)
 
-Left-click the pill. Under the clock is the note on the running entry: click it,
-or press `d`, and the line becomes a field. It is the description Moneybird may
-print on an invoice, so it is worth writing while the work is still fresh rather
-than only in the second the clock starts, which is the one moment you have
-nothing to say yet.
+Left-click the pill. Under the clock is the note on the running entry, and every
+finished row carries one too: click the line, or press `d`, and it becomes a
+field. `enter` saves, `esc` discards, clicking away saves.
+
+The note is the description Moneybird may print on an invoice, so it is worth
+writing while the work is fresh rather than only in the second the clock starts,
+which is the one moment you have nothing to say yet — and worth fixing later,
+when you remember what the work actually was.
 
 The strip across the top is the shape of the day, one band
 per project, gaps shown as gaps so you can see what you failed to track. Below
@@ -96,7 +99,7 @@ running stretch sitting in the list like any other row.
 | Key | |
 |---|---|
 | `enter` | resume the selected row's project |
-| `d` | write the note on the running entry |
+| `d` | write the note on the selected entry, or the running one |
 | `s` | start / stop |
 | `p` | quick switcher |
 | `+` / `-` | lengthen or shorten the selected entry by 5 minutes |

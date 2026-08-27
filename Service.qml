@@ -313,11 +313,28 @@ Item {
     var next = entries.slice()
     var entry = next[index]
     var end = Math.max(entry.start + 60, entry.end + delta)
-    next[index] = { id: entry.id, project: entry.project, note: entry.note, start: entry.start, end: end }
+    next[index] = Model.editedEntry(entry, { end: end })
     entries = next
     persistAll()
     changed()
     return Model.clockDuration(end - entry.start)
+  }
+
+  // The note on an entry that is already finished. Same idea as setNote, one
+  // step further back: the description is worth fixing when you remember what
+  // the work was, not only while it is still running.
+  function setEntryNote(id, text) {
+    var index = findEntry(id)
+    if (index === -1) return "unknown entry"
+    var note = String(text || "").trim()
+    var entry = entries[index]
+    if (entry.note === note) return note || "no note"
+    var next = entries.slice()
+    next[index] = Model.editedEntry(entry, { note: note })
+    entries = next
+    persistAll()
+    changed()
+    return note ? entry.project + ": " + note : "note cleared"
   }
 
   function reassignEntry(id, projectName) {
@@ -326,7 +343,7 @@ Item {
     if (index === -1 || !name) return "unknown entry"
     var next = entries.slice()
     var entry = next[index]
-    next[index] = { id: entry.id, project: name, note: entry.note, start: entry.start, end: entry.end }
+    next[index] = Model.editedEntry(entry, { project: name })
     entries = next
     projects = Model.touchProject(projects, name, now())
     persistAll()
