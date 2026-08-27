@@ -67,7 +67,12 @@ acme                        start acme now
 acme: pairing on the bar    start acme with a note
 acme +45                    start acme as if it began 45 minutes ago
 acme +45: writing the spec  both
+: reviewing the migration   note this on whatever is already running
 ```
+
+A line that is nothing but a note says something about the work in progress
+rather than starting new work, so the same keybind that switches projects is
+also how you describe the one you are on.
 
 `+45` rather than a bare `45` so a project legitimately named `sprint 45` stays
 typeable. A backdate can never reach behind the last logged entry — Punch clips
@@ -77,7 +82,13 @@ it to that boundary and says so, rather than quietly double-billing the overlap.
 
 ![The Punch day panel](docs/panel.png)
 
-Left-click the pill. The strip across the top is the shape of the day, one band
+Left-click the pill. Under the clock is the note on the running entry: click it,
+or press `d`, and the line becomes a field. It is the description Moneybird may
+print on an invoice, so it is worth writing while the work is still fresh rather
+than only in the second the clock starts, which is the one moment you have
+nothing to say yet.
+
+The strip across the top is the shape of the day, one band
 per project, gaps shown as gaps so you can see what you failed to track. Below
 it: today and this week, per-project totals, and the day's entries with the
 running stretch sitting in the list like any other row.
@@ -85,6 +96,7 @@ running stretch sitting in the list like any other row.
 | Key | |
 |---|---|
 | `enter` | resume the selected row's project |
+| `d` | write the note on the running entry |
 | `s` | start / stop |
 | `p` | quick switcher |
 | `+` / `-` | lengthen or shorten the selected entry by 5 minutes |
@@ -102,6 +114,7 @@ punch                     what is running right now
 punch start [text]        start (defaults to the last project; takes the grammar above)
 punch stop
 punch toggle
+punch note [text]         set the note on the running entry (empty clears it)
 punch discard             drop the running entry without logging it
 punch trim <minutes>      cut the last N minutes off the running entry
 punch next | prev         walk recent projects

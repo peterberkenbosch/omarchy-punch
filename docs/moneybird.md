@@ -100,6 +100,22 @@ Sending it anyway would put billable time against no project at all, which is
 the kind of thing you find out about on an invoice. Guessing is fine for a
 project name; it is not fine for money.
 
+### Descriptions
+
+An entry's note becomes the Moneybird `description`, which may be shown on the
+invoice. Three ways to write one, all of them fast:
+
+```bash
+punch start "acme: checkout redesign"   # at the start
+punch note "checkout redesign"          # any time after
+```
+
+or open the day panel and press `d`, or open the quick switcher and type a line
+that is nothing but a note: `: checkout redesign`.
+
+An entry with no note is sent with its Punch project name as the description, so
+nothing ever reaches Moneybird blank.
+
 ## 5. Check before you commit anything
 
 ```bash

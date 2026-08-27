@@ -254,6 +254,19 @@ Item {
     return "trimmed " + Model.humanDuration(away) + " from " + name
   }
 
+  // The note is the description Moneybird may print on an invoice, so it has
+  // to be writable while the work is still fresh — not only in the second the
+  // clock starts, which is the one moment you have nothing to say yet.
+  function setNote(text) {
+    if (!running) return "stopped"
+    var note = String(text || "").trim()
+    if (note === running.note) return note ? note : "no note"
+    running = { project: running.project, note: note, start: running.start }
+    persistState()
+    changed()
+    return note ? running.project + ": " + note : "note cleared"
+  }
+
   function switchTo(projectName) {
     var name = String(projectName || "").trim()
     if (!name) return "no project"
@@ -649,6 +662,7 @@ Item {
       for (var i = 0; i < root.projects.length; i++) names.push(root.projects[i].name)
       return names.join("\n")
     }
+    function note(text: string): string { return root.setNote(text) }
     function sync(): string { return root.runSync() }
     function syncstatus(): string { return root.syncStatus() }
     function pick(): string { return root.openQuickSwitch() ? "ok" : "no overlay" }

@@ -67,6 +67,24 @@ Panel {
 
   property int cursor: 0
   property bool cursorActive: false
+  property bool editingNote: false
+
+  // The note line under the clock is where the description already shows, so
+  // it is where you write it. No dialog, no second panel: click the line, or
+  // press d, and the same text becomes a field.
+  function beginNoteEdit() {
+    if (!tracking) return
+    editingNote = true
+  }
+
+  function commitNote(text) {
+    if (punch) punch.setNote(text)
+    editingNote = false
+  }
+
+  function cancelNoteEdit() {
+    editingNote = false
+  }
 
   readonly property var dayEntries: punch ? punch.todayEntries : []
   readonly property var liveEntry: live && punch
@@ -143,6 +161,7 @@ Panel {
     registeredService.unregisterWidget(root)
 
   onOpenedChanged: if (opened) {
+    editingNote = false
     cursorActive = false
     cursor = Math.max(0, rows.length - 1)
     if (panelFlick) panelFlick.contentY = 0
@@ -240,6 +259,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While the note field has the keys, j/k/x are letters, not commands.
+      blocked: root.editingNote
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -249,7 +270,8 @@ Panel {
       onDeleteRequested: root.deleteSelected()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "s" || t === "S") root.toggleClock()
+        if (t === "d" || t === "D") root.beginNoteEdit()
+        else if (t === "s" || t === "S") root.toggleClock()
         else if (t === "p" || t === "P" || t === "n" || t === "N") root.openQuickSwitch()
         else if (t === "+" || t === "=") root.adjustSelected(5)
         else if (t === "-" || t === "_") root.adjustSelected(-5)
@@ -311,14 +333,61 @@ Panel {
                   font.pixelSize: Style.font.displayLarge
                 }
 
-                Text {
+                // Reads as a line of text until you touch it, so an entry
+                // with nothing to say costs no visual weight, and one that
+                // needs a description is one click from having one.
+                Item {
                   Layout.fillWidth: true
-                  visible: !!root.live && root.live.note !== ""
-                  text: root.live ? root.live.note : ""
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  visible: root.tracking
+                  implicitHeight: root.editingNote ? noteField.implicitHeight : noteText.implicitHeight
+
+                  Text {
+                    id: noteText
+                    visible: !root.editingNote
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.live && root.live.note ? root.live.note : "add a note…"
+                    opacity: root.live && root.live.note ? 1.0 : 0.55
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.IBeamCursor
+                      onClicked: root.beginNoteEdit()
+                    }
+                  }
+
+                  TextField {
+                    id: noteField
+                    visible: root.editingNote
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    foreground: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    verticalPadding: Style.space(3)
+                    placeholderText: "What are you doing?"
+
+                    onVisibleChanged: if (visible) {
+                      text = root.live && root.live.note ? root.live.note : ""
+                      Qt.callLater(function() { noteField.forceActiveFocus(); noteField.selectAll() })
+                    }
+                    onAccepted: root.commitNote(text)
+                    Keys.onEscapePressed: function(event) {
+                      root.cancelNoteEdit()
+                      event.accepted = true
+                    }
+                    // Clicking away is a commit, not a discard: the text you
+                    // typed is what you meant, and losing it to a stray click
+                    // would teach you not to trust the field.
+                    onActiveFocusChanged: if (!activeFocus && root.editingNote) root.commitNote(text)
+                  }
                 }
               }
 
@@ -473,7 +542,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: "enter resume · s start/stop · p switch · +/- 5 min · x delete"
+            text: "enter resume · d note · s start/stop · p switch · +/- 5 min · x delete"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

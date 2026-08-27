@@ -15,6 +15,7 @@ Usage: punch [command] [arguments]
   punch stop                stop and log the running entry
   punch toggle              stop if running, otherwise resume the last project
   punch discard             drop the running entry without logging it
+  punch note [text]         set the note on the running entry (empty clears it)
   punch trim <minutes>      cut the last N minutes off the running entry
   punch next | prev         walk recent projects without stopping the clock
   punch today               today's totals per project
@@ -55,6 +56,9 @@ status)
   ;;
 start)
   call start "${1-}"
+  ;;
+note)
+  call note "${1-}"
   ;;
 stop | toggle | discard | today | week | projects | pick | panel)
   call "$command"

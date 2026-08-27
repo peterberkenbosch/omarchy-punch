@@ -35,6 +35,12 @@ Item {
   readonly property var live: service && service.running ? service.running : null
   readonly property bool tracking: live !== null
 
+  // A line that is nothing but a note — ": pairing on the indexer" — means
+  // "say this about what I am already doing", not "start something". Reuses
+  // the grammar and the keybind that already exist rather than inventing a
+  // second way in.
+  readonly property bool noteOnly: !parsed.project && parsed.note.length > 0 && live !== null
+
   // Today's totals, so the list answers "how long have I been on this
   // already" at the same moment it asks which project you want.
   readonly property var todayByProject: {
@@ -54,6 +60,9 @@ Item {
   // empty filter: once you are typing a name you are switching, not stopping.
   readonly property var rows: {
     var out = []
+    if (noteOnly)
+      return [{ kind: "note", label: "Note: " + parsed.note, meta: live.project }]
+
     var current = live
     if (current && !parsed.project)
       out.push({ kind: "stop", label: "Stop " + current.project, meta: Model.clockDuration(service.elapsed) })
@@ -79,6 +88,7 @@ Item {
   }
 
   readonly property string hint: {
+    if (noteOnly) return "note this on " + live.project
     if (parsed.backdateMinutes > 0 && parsed.note)
       return "starts " + parsed.backdateMinutes + " min ago · " + parsed.note
     if (parsed.backdateMinutes > 0) return "starts " + parsed.backdateMinutes + " min ago"
@@ -138,6 +148,11 @@ Item {
 
     if (row.kind === "stop") {
       service.stop()
+      dismiss()
+      return
+    }
+    if (row.kind === "note") {
+      service.setNote(parsed.note)
       dismiss()
       return
     }
@@ -301,7 +316,7 @@ Item {
         Text {
           id: footer
           width: parent.width
-          text: "enter start · ctrl+n/p move · esc close"
+          text: "enter start · :note on the running entry · ctrl+n/p move · esc close"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -339,15 +354,15 @@ Item {
         height: Style.space(7)
         radius: width / 2
         anchors.verticalCenter: parent.verticalCenter
-        visible: switchRow.row && switchRow.row.kind !== "stop"
+        visible: switchRow.row && switchRow.row.kind !== "stop" && switchRow.row.kind !== "note"
         color: switchRow.row ? root.projectColor(switchRow.row.name) : root.dim
         opacity: switchRow.row && switchRow.row.kind === "create" ? 0.45 : 1.0
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        visible: switchRow.row && switchRow.row.kind === "stop"
-        text: "󰓛"
+        visible: switchRow.row && (switchRow.row.kind === "stop" || switchRow.row.kind === "note")
+        text: switchRow.row && switchRow.row.kind === "note" ? "󰲶" : "󰓛"
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
