@@ -137,20 +137,14 @@ up to it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moneybird/moneybird-cli/main/install.sh | bash
-moneybird-cli login <token>          # Settings > External applications and AI connections
+moneybird-cli login <token>                       # scope: time_entries
 ```
 
-The token needs the `time_entries` scope, and Moneybird also wants the API user
-to have sales-invoice access for this endpoint. Turn the push on by setting
-`moneybirdSync` to `true` on the bar entry in `shell.json`.
-
-### Mapping
-
-`~/.config/punch/moneybird.json` decides where time lands:
+Then set `moneybirdSync` to `true` on the Punch entry in `shell.json`, and map
+your projects in `~/.config/punch/moneybird.json`:
 
 ```json
 {
-  "userId": "",
   "defaultBillable": true,
   "projects": {
     "admin":    { "billable": false, "project": null },
@@ -160,48 +154,24 @@ to have sales-invoice access for this endpoint. Turn the push on by setting
 ```
 
 A Punch project with no entry here is matched against your Moneybird projects by
-name, so calling one `fizzy` on both sides is all the configuration it needs.
-Everything else is a line in this file:
-
-| Key | |
-|---|---|
-| `project` | the Moneybird project name to use instead of the Punch one; `null` books the time with no project |
-| `contact` | the Moneybird contact to attach, matched on company or full name |
-| `billable` | overrides `defaultBillable` for this project |
-| `userId` | whose time this is; resolved automatically when the administration has one person who can track time |
-
-A Punch project that matches no Moneybird project and has no mapping is
-**refused, not guessed**. Booking it anyway would put billable time against no
-project at all, which is the kind of thing you find out about on an invoice. The
-entry stays queued and says what to map.
-
-### Checking and driving it
+name, so calling one `fizzy` on both sides needs no configuration at all. One
+that matches nothing and is not mapped is **refused, not guessed** — booking it
+anyway would put billable time against no project, which is the kind of thing
+you find out about on an invoice.
 
 ```bash
 punch sync                  # push anything not yet in Moneybird
 punch sync status           # how far behind the push is
 punch-moneybird doctor      # login, resolved user, and your Moneybird projects
-punch-moneybird projects    # ids and names
-punch-moneybird contacts    # ids and names
 ```
 
 The day panel shows `n entries waiting to sync` while there is a backlog, and
-puts a tick on every row that has reached Moneybird. Three failures in a row
-raise one notification whose click retries.
+puts a tick on every row that has reached Moneybird.
 
-The push itself is [`bin/punch-moneybird`](bin/punch-moneybird), a plain script
-the shell shells out to. Nothing about the network lives inside the QML: a sync
-that goes wrong can be run, read, and argued with from a terminal.
+Entries are only ever **created** — editing or deleting one after it has synced
+does not propagate.
 
-### What it does not do
-
-Entries are only ever **created**. Editing a duration or deleting an entry after
-it has synced does not propagate — Moneybird keeps the original, and the tick in
-the panel is how you tell which rows are already committed. Fix those in
-Moneybird, or delete there and let the entry re-sync.
-
-Entries shorter than a minute are never sent: Moneybird rounds to whole minutes
-and needs at least one, so they are marked settled rather than queued forever.
+**[Full setup, mapping reference, and troubleshooting →](docs/moneybird.md)**
 
 ## Settings
 
