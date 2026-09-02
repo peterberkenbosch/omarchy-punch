@@ -42,6 +42,20 @@ o.bind("SUPER + SHIFT + T", "Punch: start/stop", "punch toggle")
 o.bind("SUPER + ALT + T", "Punch: switch project", "punch pick")
 ```
 
+## Uninstall
+
+```bash
+omarchy plugin remove pb.punch --yes
+rm -f ~/.local/bin/punch
+```
+
+Then drop the two keybindings from `bindings.lua`. Your time log is left alone;
+delete it yourself if you want it gone:
+
+```bash
+rm -rf ~/.local/share/punch ~/.config/punch
+```
+
 ## The pill
 
 Stopped, it is a quiet glyph. Running, it becomes a pill in the project's color
@@ -80,7 +94,7 @@ it to that boundary and says so, rather than quietly double-billing the overlap.
 
 ## The day panel
 
-![The Punch day panel](docs/panel.png)
+![The Punch day panel](preview.png)
 
 Left-click the pill. Under the clock is the note on the running entry, and every
 finished row carries one too: click the line, or press `d`, and it becomes a
@@ -151,8 +165,11 @@ because you were offline or your token expired stays queued and is retried with
 a widening backoff, so the log on disk is always the truth and Moneybird catches
 up to it.
 
+Install [moneybird-cli](https://github.com/moneybird/moneybird-cli) following
+its own README (a manual route without the installer is in
+[docs/moneybird.md](docs/moneybird.md)), then log in:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moneybird/moneybird-cli/main/install.sh | bash
 moneybird-cli login <token>       # scopes: time_entries, sales_invoices, settings
 ```
 
