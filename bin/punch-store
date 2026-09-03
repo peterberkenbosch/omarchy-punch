@@ -1,0 +1,216 @@
+#!/usr/bin/perl
+
+# Punch's only way onto the disk. The service never opens state.json or
+# entries.jsonl itself; it asks this helper to read one or to publish one.
+#
+#   punch-store read  <state|entries>          file text on stdout, or nothing
+#   punch-store write <state|entries> <bytes>  new text on stdin, exactly <bytes>
+#
+# Every operation is relative to a directory descriptor, never to a pathname:
+#
+#   - The data directory ($XDG_DATA_HOME/punch, default
+#     ~/.local/share/punch) is opened one component at a time with
+#     O_NOFOLLOW | O_DIRECTORY. Ancestors must belong to root or to the
+#     user and must not be writable by others unless sticky. The final
+#     directory is created 0700 if missing, must belong to the user, and is
+#     made 0700 if it is not.
+#   - Files are opened relative to that descriptor (through the kernel's
+#     /proc/self/fd magic link) with O_NOFOLLOW, and must be regular files
+#     owned by the user. A link, a FIFO, a device, or a file over the byte
+#     ceiling is refused, never read.
+#   - A write goes to a fresh O_EXCL temp file in the same directory, is
+#     fsynced, and is renamed over the target relative to the same
+#     descriptor, then the directory is fsynced. The target is therefore
+#     always either the old text or the complete new text, and a link left at
+#     its name is replaced rather than written through. The caller states
+#     the byte count it is sending, and a payload of any other length is
+#     refused, so a broken pipe can never publish an empty log.
+#
+# Written in Perl rather than bash because bash cannot ask for O_NOFOLLOW or
+# O_EXCL, and Perl is already on every Omarchy install.
+
+use strict;
+use warnings;
+use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_DIRECTORY O_NONBLOCK S_ISDIR S_ISREG);
+use IO::Handle;
+use POSIX qw(ENOENT EEXIST);
+
+# The same ceilings Model.js quotes as LIMITS.stateBytes and LIMITS.entriesBytes.
+my %FILES = (
+  state   => { name => "state.json",    max => 65536 },
+  entries => { name => "entries.jsonl", max => 4194304 },
+);
+
+my $STALE_TEMP_SECONDS = 3600;
+
+sub fail {
+  my ($message) = @_;
+  print STDERR "punch-store: $message\n";
+  exit 1;
+}
+
+sub data_dir {
+  my $home = $ENV{HOME};
+  fail("HOME is not an absolute path") unless defined $home && $home =~ m{^/};
+  my $base = $ENV{XDG_DATA_HOME};
+  $base = "$home/.local/share" unless defined $base && $base =~ m{^/};
+  return "$base/punch";
+}
+
+# A name inside the directory we hold open, addressed through the
+# descriptor so the kernel resolves it against that inode whatever the
+# original pathname has since become.
+sub in_dir {
+  my ($dir, $name) = @_;
+  return "/proc/self/fd/" . fileno($dir) . "/$name";
+}
+
+sub open_data_dir {
+  my $path = data_dir();
+  my @parts = grep { length } split m{/}, $path;
+  fail("unsafe data path: $path") if grep { $_ eq "." || $_ eq ".." } @parts;
+
+  sysopen(my $dir, "/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or fail("cannot open /: $!");
+  my $seen = "";
+  for my $index (0 .. $#parts) {
+    my $name = $parts[$index];
+    my $last = $index == $#parts;
+    $seen .= "/$name";
+
+    my $next;
+    my $created = 0;
+    unless (sysopen($next, in_dir($dir, $name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)) {
+      fail("$seen: $!") unless $last && $! == ENOENT;
+      mkdir(in_dir($dir, $name), 0700) or $! == EEXIST or fail("cannot create $seen: $!");
+      $created = 1;
+      sysopen($next, in_dir($dir, $name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)
+        or fail("cannot open $seen without following links: $!");
+    }
+
+    my @st = stat($next) or fail("cannot stat $seen: $!");
+    my ($mode, $uid) = ($st[2], $st[4]);
+    fail("$seen is not a directory") unless S_ISDIR($mode);
+    my $perm = $mode & 07777;
+    if ($last) {
+      fail("$seen is not owned by you") unless $uid == $>;
+      if ($perm != 0700) {
+        chmod(0700, $next) or fail("cannot make $seen private: $!");
+      }
+    } else {
+      fail("$seen is owned by someone other than you or root") unless $uid == 0 || $uid == $>;
+      fail("$seen is writable by others") if ($perm & 022) && !($perm & 01000);
+    }
+    if ($created) {
+      $next->sync or fail("cannot sync $seen: $!");
+      $dir->sync or fail("cannot sync the parent of $seen: $!");
+    }
+    $dir = $next;
+  }
+  return $dir;
+}
+
+sub read_file {
+  my ($spec) = @_;
+  my $dir = open_data_dir();
+  my $name = $spec->{name};
+
+  my $file;
+  unless (sysopen($file, in_dir($dir, $name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) {
+    exit 0 if $! == ENOENT;
+    fail("cannot open $name without following links: $!");
+  }
+  my @st = stat($file) or fail("cannot stat $name: $!");
+  fail("$name is not a regular file") unless S_ISREG($st[2]);
+  fail("$name is not owned by you") unless $st[4] == $>;
+  fail("$name is larger than $spec->{max} bytes; not loading it") if $st[7] > $spec->{max};
+
+  binmode $file;
+  binmode STDOUT;
+  my $text = "";
+  while (1) {
+    my $got = sysread($file, my $chunk, 65536);
+    fail("cannot read $name: $!") unless defined $got;
+    last if $got == 0;
+    $text .= $chunk;
+    fail("$name grew past $spec->{max} bytes while being read") if length($text) > $spec->{max};
+  }
+  print STDOUT $text;
+  exit 0;
+}
+
+# Temp files a crashed run left behind are swept before a new one is made,
+# so a lost shell never turns into a directory that fills up.
+sub sweep_stale_temps {
+  my ($dir, $name) = @_;
+  opendir(my $handle, "/proc/self/fd/" . fileno($dir)) or return;
+  my $now = time;
+  for my $entry (readdir $handle) {
+    next unless $entry =~ /^\.\Q$name\E\.tmp\.(\d+)$/ && $1 != $$;
+    my @st = lstat(in_dir($dir, $entry)) or next;
+    next unless S_ISREG($st[2]) && $now - $st[9] > $STALE_TEMP_SECONDS;
+    unlink(in_dir($dir, $entry));
+  }
+  closedir $handle;
+}
+
+sub write_file {
+  my ($spec, $expected) = @_;
+  my $name = $spec->{name};
+  fail("write needs the byte count being sent") unless defined $expected && $expected =~ /^\d+$/;
+  fail("$name: refusing to write more than $spec->{max} bytes") if $expected > $spec->{max};
+
+  binmode STDIN;
+  my $text = "";
+  while (1) {
+    my $got = sysread(STDIN, my $chunk, 65536);
+    fail("cannot read the new $name from stdin: $!") unless defined $got;
+    last if $got == 0;
+    $text .= $chunk;
+    fail("$name: got more than the $expected bytes announced") if length($text) > $expected;
+  }
+  fail("$name: got " . length($text) . " bytes, expected $expected") unless length($text) == $expected;
+
+  my $dir = open_data_dir();
+  sweep_stale_temps($dir, $name);
+
+  my $temp = ".$name.tmp.$$";
+  my $file;
+  for my $attempt (1, 2) {
+    last if sysopen($file, in_dir($dir, $temp), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    fail("cannot create $temp: $!") unless $! == EEXIST && $attempt == 1;
+    # Only a crashed run under a since-reused pid leaves this behind.
+    unlink(in_dir($dir, $temp));
+  }
+
+  my $published = eval {
+    binmode $file;
+    my $offset = 0;
+    while ($offset < length $text) {
+      my $wrote = syswrite($file, $text, length($text) - $offset, $offset);
+      die "cannot write $temp: $!\n" unless defined $wrote;
+      $offset += $wrote;
+    }
+    $file->sync or die "cannot sync $temp: $!\n";
+    close($file) or die "cannot close $temp: $!\n";
+    rename(in_dir($dir, $temp), in_dir($dir, $name)) or die "cannot publish $name: $!\n";
+    $dir->sync or die "cannot sync the data directory: $!\n";
+    1;
+  };
+  unless ($published) {
+    my $error = $@;
+    chomp $error;
+    unlink(in_dir($dir, $temp));
+    fail($error);
+  }
+  exit 0;
+}
+
+my ($command, $which, $bytes) = @ARGV;
+my $spec = defined $which ? $FILES{$which} : undef;
+if (!defined $command || !$spec || ($command ne "read" && $command ne "write")) {
+  print STDERR "Usage: punch-store read <state|entries>\n";
+  print STDERR "       punch-store write <state|entries> <bytes>   (new text on stdin)\n";
+  exit 2;
+}
+read_file($spec) if $command eq "read";
+write_file($spec, $bytes);

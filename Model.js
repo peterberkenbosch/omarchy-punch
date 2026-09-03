@@ -4,8 +4,59 @@
 
 var SECONDS_PER_DAY = 86400
 
+// Every bound the plugin enforces, in one place. The QML, the store helper,
+// the Moneybird pusher and the docs all quote these; anything read from disk,
+// typed into a field, or handed over IPC is cut to them before it is kept.
+var LIMITS = {
+  projectChars: 80,        // longest project name
+  noteChars: 500,          // longest note, which is the Moneybird description
+  inputChars: 1000,        // longest line accepted by the quick-input grammar
+  lineChars: 4096,         // longest line considered in entries.jsonl
+  projects: 200,           // known projects kept; least recently used go first
+  entries: 20000,          // finished entries kept; the oldest go first
+  panelRows: 200,          // rows the day panel will draw
+  reportRows: 200,         // projects a text report will list
+  syncBatch: 50,           // entries handed to one Moneybird push
+  syncResultBytes: 262144, // longest pusher output the service will parse
+  syncErrorChars: 200,     // longest error text remembered from a push
+  stateBytes: 65536,       // state.json ceiling (also enforced by bin/punch-store)
+  entriesBytes: 4194304,   // entries.jsonl ceiling (also enforced by bin/punch-store)
+  backdateMinutes: 10080,  // a week: furthest a start can be pushed back
+  adjustMinutes: 1440,     // a day: largest single edit to an entry's length
+  spanSeconds: 366 * SECONDS_PER_DAY, // longest entry; anything longer is junk
+  maxEpoch: 4102444800     // 2100-01-01: later timestamps are junk
+}
+
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+// The one gate for free text. Control characters (including newlines, which
+// would break the line-oriented log and every one-line IPC answer) become
+// spaces, and the result is trimmed and cut to `max` characters.
+function cleanText(value, max) {
+  var s = String(value === undefined || value === null ? "" : value)
+  s = s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").trim()
+  return s.length > max ? s.substring(0, max) : s
+}
+
+function validEpoch(n) {
+  return isFinite(n) && n >= 0 && n <= LIMITS.maxEpoch
+}
+
+// Byte length of a string as UTF-8, which is what the store helper is told
+// to expect on stdin so a short or broken payload is refused, not published.
+function utf8Length(text) {
+  var s = String(text === undefined || text === null ? "" : text)
+  var bytes = 0
+  for (var i = 0; i < s.length; i++) {
+    var code = s.charCodeAt(i)
+    if (code < 0x80) bytes += 1
+    else if (code < 0x800) bytes += 2
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) { bytes += 4; i++ }
+    else bytes += 3
+  }
+  return bytes
 }
 
 function pad2(n) {
@@ -106,32 +157,57 @@ function newId(startSeconds, project, salt) {
 // stop asking to be sent, or it queues forever.
 function sanitizeSync(raw) {
   if (!isPlainObject(raw)) return null
-  var id = String(raw.id || "")
+  var id = cleanText(raw.id, 64)
   var skipped = raw.skipped === true
   if (!id && !skipped) return null
-  var out = { syncedAt: Math.floor(Number(raw.syncedAt)) || 0 }
+  var syncedAt = Math.floor(Number(raw.syncedAt))
+  var out = { syncedAt: validEpoch(syncedAt) ? syncedAt : 0 }
   if (id) out.id = id
   if (skipped) out.skipped = true
-  if (raw.reason) out.reason = String(raw.reason)
+  var reason = cleanText(raw.reason, LIMITS.syncErrorChars)
+  if (reason) out.reason = reason
   return out
 }
 
+// Every entry passes through here, whether it came from the clock, the log on
+// disk, or an edit. Names and notes are bounded text; times must be real
+// epochs in a sane range; an entry longer than a year is not a work day.
 function sanitizeEntry(raw) {
   if (!isPlainObject(raw)) return null
   var start = Math.floor(Number(raw.start))
   var end = Math.floor(Number(raw.end))
-  var project = String(raw.project || "").trim()
-  if (!project || !isFinite(start) || !isFinite(end) || end <= start) return null
+  var project = cleanText(raw.project, LIMITS.projectChars)
+  if (!project || !validEpoch(start) || !validEpoch(end) || end <= start) return null
+  if (end - start > LIMITS.spanSeconds) return null
   var out = {
-    id: String(raw.id || newId(start, project, end)),
+    id: cleanText(raw.id, 64) || newId(start, project, end),
     project: project,
-    note: String(raw.note || ""),
+    note: cleanText(raw.note, LIMITS.noteChars),
     start: start,
     end: end
   }
   var sync = sanitizeSync(raw.moneybird)
   if (sync) out.moneybird = sync
   return out
+}
+
+// The running entry from state.json, or null. A start in the future is
+// clamped to now rather than counting down.
+function sanitizeRunning(raw, nowSeconds) {
+  if (!isPlainObject(raw)) return null
+  var project = cleanText(raw.project, LIMITS.projectChars)
+  var start = Math.floor(Number(raw.start))
+  if (!project || !validEpoch(start)) return null
+  return { project: project, note: cleanText(raw.note, LIMITS.noteChars), start: Math.min(start, nowSeconds) }
+}
+
+// Appends to the log, keeping the newest LIMITS.entries. A log that grows
+// without bound is a file the store helper will one day refuse to load.
+function appendEntry(entries, entry) {
+  var next = entries.slice()
+  next.push(entry)
+  if (next.length > LIMITS.entries) next = next.slice(next.length - LIMITS.entries)
+  return next
 }
 
 // The single way to rewrite an entry. Editing one used to rebuild it field by
@@ -147,6 +223,8 @@ function editedEntry(entry, changes) {
     end: entry.end
   }
   for (var key in (changes || {})) out[key] = changes[key]
+  out.project = cleanText(out.project, LIMITS.projectChars) || entry.project
+  out.note = cleanText(out.note, LIMITS.noteChars)
   if (entry.moneybird) out.moneybird = entry.moneybird
   return out
 }
@@ -163,11 +241,13 @@ function unsyncedEntries(entries) {
   return out
 }
 
-// Only the fields the pusher needs. Keeping the payload narrow means a change
-// to how entries are stored does not silently change what leaves the machine.
+// Only the fields the pusher needs, and only LIMITS.syncBatch of them. Keeping
+// the payload narrow means a change to how entries are stored does not
+// silently change what leaves the machine; keeping it short means one push
+// has a bounded runtime and a bounded answer, and a backlog drains in rounds.
 function syncPayload(entries) {
   var out = []
-  for (var i = 0; i < entries.length; i++) {
+  for (var i = 0; i < entries.length && out.length < LIMITS.syncBatch; i++) {
     out.push({
       id: entries[i].id,
       project: entries[i].project,
@@ -183,7 +263,7 @@ function syncPayload(entries) {
 // id and without `skipped` is a failure: it records nothing, so the entry
 // stays owed and the next run picks it up again.
 function applySyncResults(entries, results, atSeconds) {
-  var byId = {}
+  var byId = Object.create(null)
   for (var r = 0; r < (results || []).length; r++) {
     var result = results[r]
     if (isPlainObject(result) && result.id) byId[String(result.id)] = result
@@ -216,17 +296,38 @@ function syncErrors(results) {
   var out = []
   for (var i = 0; i < (results || []).length; i++) {
     var result = results[i]
-    if (isPlainObject(result) && result.error && result.skipped !== true) out.push(result.error)
+    if (!isPlainObject(result) || result.skipped === true) continue
+    var error = cleanText(result.error, LIMITS.syncErrorChars)
+    if (error) out.push(error)
   }
   return out
 }
 
+// The pusher's answer, or null when it is not the bounded JSON array the
+// contract promises. Size is checked before parsing, and the array is cut to
+// one batch, so a misbehaving helper cannot hand the service more than the
+// service ever asked for.
+function parseSyncResults(text) {
+  var raw = String(text || "")
+  if (!raw.trim() || raw.length > LIMITS.syncResultBytes) return null
+  var parsed = null
+  try { parsed = JSON.parse(raw) } catch (e) { return null }
+  if (!Array.isArray(parsed)) return null
+  return parsed.length > LIMITS.syncBatch ? parsed.slice(0, LIMITS.syncBatch) : parsed
+}
+
+// The log is read newest-last, and when it holds more than the plugin keeps,
+// it is the oldest lines that go. Bytes are bounded by the store helper before
+// the text ever gets here; this is the second fence, so the model holds even
+// when fed by something other than the helper.
 function parseEntries(text) {
-  var lines = String(text || "").split("\n")
+  var raw = String(text || "")
+  if (raw.length > LIMITS.entriesBytes) raw = raw.substring(raw.length - LIMITS.entriesBytes)
+  var lines = raw.split("\n")
   var out = []
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
-    if (!line) continue
+    if (!line || line.length > LIMITS.lineChars) continue
     try {
       var entry = sanitizeEntry(JSON.parse(line))
       if (entry) out.push(entry)
@@ -235,6 +336,7 @@ function parseEntries(text) {
     }
   }
   out.sort(function(a, b) { return a.start - b.start })
+  if (out.length > LIMITS.entries) out = out.slice(out.length - LIMITS.entries)
   return out
 }
 
@@ -278,7 +380,9 @@ function totalSeconds(entries) {
 }
 
 function byProject(entries) {
-  var totals = {}
+  // A null-prototype map, so a project named "constructor" or "__proto__"
+  // is a project and not a lookup into Object.prototype.
+  var totals = Object.create(null)
   var order = []
   for (var i = 0; i < entries.length; i++) {
     var name = entries[i].project
@@ -328,10 +432,24 @@ function projectHue(name) {
 
 function sanitizeProject(raw) {
   if (!isPlainObject(raw)) return null
-  var name = String(raw.name || "").trim()
+  var name = cleanText(raw.name, LIMITS.projectChars)
   if (!name) return null
   var lastUsed = Math.floor(Number(raw.lastUsed))
-  return { name: name, lastUsed: isFinite(lastUsed) ? lastUsed : 0 }
+  return { name: name, lastUsed: validEpoch(lastUsed) ? lastUsed : 0 }
+}
+
+// The project list from state.json: cleaned, most recent first, and cut to
+// LIMITS.projects so a hand-edited file cannot grow the switcher's model
+// without bound.
+function sanitizeProjects(list) {
+  var cleaned = []
+  var raw = Array.isArray(list) ? list : []
+  for (var i = 0; i < raw.length; i++) {
+    var project = sanitizeProject(raw[i])
+    if (project) cleaned.push(project)
+  }
+  cleaned.sort(function(a, b) { return b.lastUsed - a.lastUsed })
+  return cleaned.length > LIMITS.projects ? cleaned.slice(0, LIMITS.projects) : cleaned
 }
 
 function findProject(projects, name) {
@@ -342,9 +460,11 @@ function findProject(projects, name) {
   return null
 }
 
+// Bumps `name` to the top of the recent list, adding it if new, and drops the
+// least recently used beyond LIMITS.projects.
 function touchProject(projects, name, atSeconds) {
   var next = []
-  var key = String(name || "").trim()
+  var key = cleanText(name, LIMITS.projectChars)
   var seen = false
   for (var i = 0; i < projects.length; i++) {
     if (projects[i].name.toLowerCase() === key.toLowerCase()) {
@@ -356,7 +476,7 @@ function touchProject(projects, name, atSeconds) {
   }
   if (!seen && key) next.push({ name: key, lastUsed: atSeconds })
   next.sort(function(a, b) { return b.lastUsed - a.lastUsed })
-  return next
+  return next.length > LIMITS.projects ? next.slice(0, LIMITS.projects) : next
 }
 
 // Subsequence match. Word starts score triple and adjacent hits score a
@@ -408,8 +528,11 @@ function rankProjects(projects, query) {
 //   acme +45: writing the spec  both
 // `+45` rather than a bare `45` so a project legitimately named "sprint 45"
 // stays typeable.
+// The line is bounded before it is parsed, and each part is bounded after, so
+// a project name or note can never be longer through this door than through
+// any other.
 function parseQuickInput(text) {
-  var raw = String(text || "").trim()
+  var raw = cleanText(text, LIMITS.inputChars)
   var note = ""
   var colon = raw.indexOf(":")
   if (colon !== -1) {
@@ -419,10 +542,22 @@ function parseQuickInput(text) {
   var backdate = 0
   var match = raw.match(/\s*\+(\d{1,4})$/)
   if (match) {
-    backdate = parseInt(match[1], 10)
+    backdate = Math.min(LIMITS.backdateMinutes, parseInt(match[1], 10))
     raw = raw.slice(0, raw.length - match[0].length).trim()
   }
-  return { project: raw, note: note, backdateMinutes: backdate }
+  return {
+    project: cleanText(raw, LIMITS.projectChars),
+    note: cleanText(note, LIMITS.noteChars),
+    backdateMinutes: backdate
+  }
+}
+
+// Minutes typed or clicked into an edit, clamped to [0, max]. Anything that is
+// not a number is zero, which every caller treats as "nothing to do".
+function clampMinutes(value, max) {
+  var n = Math.floor(Number(value))
+  if (!isFinite(n)) return 0
+  return Math.max(0, Math.min(max, n))
 }
 
 // ---------------------------------------------------------------- export
@@ -458,12 +593,16 @@ function statusLine(running, elapsedSeconds) {
   return running.project + " " + clockDuration(elapsedSeconds) + note
 }
 
+// A report lists at most LIMITS.reportRows projects, largest first, and says
+// how many it left out. The total on the last line always covers everything.
 function summaryLines(entries, label) {
   var totals = byProject(entries)
   var lines = []
-  for (var i = 0; i < totals.length; i++) {
+  var shown = Math.min(totals.length, LIMITS.reportRows)
+  for (var i = 0; i < shown; i++) {
     lines.push(rightPad(totals[i].project, 24) + clockDuration(totals[i].seconds))
   }
+  if (totals.length > shown) lines.push("... and " + (totals.length - shown) + " more")
   lines.push(rightPad(label, 24) + clockDuration(totalSeconds(entries)))
   return lines
 }
@@ -476,6 +615,15 @@ function rightPad(value, width) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    LIMITS: LIMITS,
+    cleanText: cleanText,
+    validEpoch: validEpoch,
+    utf8Length: utf8Length,
+    sanitizeRunning: sanitizeRunning,
+    appendEntry: appendEntry,
+    parseSyncResults: parseSyncResults,
+    sanitizeProjects: sanitizeProjects,
+    clampMinutes: clampMinutes,
     dayStart: dayStart,
     addDays: addDays,
     dayEnd: dayEnd,

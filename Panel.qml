@@ -110,7 +110,14 @@ Panel {
     Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
   }
 
-  readonly property var dayEntries: punch ? punch.todayEntries : []
+  // The newest LIMITS.panelRows of the day. A log that somehow holds more in
+  // one day than that is drawn from the end, not delegate by delegate until
+  // the shell stalls.
+  readonly property var dayEntries: {
+    if (!punch) return []
+    var all = punch.todayEntries
+    return all.length > Model.LIMITS.panelRows ? all.slice(all.length - Model.LIMITS.panelRows) : all
+  }
   readonly property var liveEntry: live && punch
     ? Model.clipToRange({ id: "running", project: live.project, note: live.note, start: live.start, end: punch.nowSec },
         punch.todayStart, Model.dayEnd(punch.todayStart))

@@ -166,6 +166,57 @@ on its own.
 
 `punch sync` forces a run immediately, whatever the backoff is doing.
 
+## Bounds and lifecycle
+
+The push is the one place Punch talks to a network and runs somebody else's
+program, so it is fenced on every side.
+
+**What goes in.** One run carries at most 50 entries. The service picks the
+oldest owed ones; a larger backlog drains in rounds of 50, each round
+scheduled as soon as the previous one lands. The helper reads its input
+through a 1 MiB cap and checks every entry before doing anything: a string
+id of at most 64 characters, a project of at most 80, a note of at most 500,
+no control characters in any of them, and sane times. The mapping file is
+capped at 64 KiB.
+
+**What comes back.** One result per entry attempted, never more than 50, each
+error cut to 200 characters. The service parses the answer only if it is
+under 256 KiB and is a JSON array; anything else is a failed run, not data.
+Every `moneybird-cli` answer is capped at 4 MiB before it is read.
+
+**Deadlines.** Every `moneybird-cli` call runs under `timeout(1)` with
+`PUNCH_MONEYBIRD_TIMEOUT` seconds (default 30) and a hard kill five seconds
+after that. The run has a budget of `PUNCH_MONEYBIRD_BUDGET` seconds (default
+90); entries not reached are simply not in the results and go out next time.
+The service keeps a two-minute watchdog on top, as the last fence.
+
+**Teardown.** The helper runs each call as a background job it waits on, so a
+SIGTERM is acted on at once rather than after the call: the call in flight is
+terminated (`timeout` forwards the signal to the process group it made for
+the call, which is what takes `curl` down with `moneybird-cli`), the work
+directory under `$XDG_RUNTIME_DIR` is removed, and the helper exits. The
+service starts the helper through `setsid --wait --fork`, so the process
+Quickshell holds is a thin parent; when the shell reloads or the service is
+destroyed, Quickshell kills that parent, the helper notices within half a
+second that it has been orphaned, and tears itself down the same way.
+Cancelling (the watchdog, or switching `moneybirdSync` off mid-push) is
+SIGTERM to the parent, then SIGKILL five seconds later. A cancelled or
+timed-out run records nothing, however far it got: the next run re-sends
+what is still owed. That means a call cancelled after Moneybird accepted it
+but before the answer arrived can leave one entry there twice; the tick in
+the panel is what to check.
+
+**The description on the command line.** `moneybird-cli time_entries create`
+takes the description only as `--description <text>`, so the note is an
+argument of that process for the length of the call, visible in the process
+list to other users of the same machine unless `/proc` is mounted with
+`hidepid`. Notes are work descriptions headed for an invoice, not secrets;
+do not put anything in one that should not be.
+
+`bash test/moneybird-test.sh` runs the helper against a stub `moneybird-cli`
+that hangs, and checks each of the three teardown paths leaves no process
+and no work directory behind.
+
 ## Troubleshooting
 
 | What you see | What it means |
@@ -179,6 +230,9 @@ on its own.
 | `no Moneybird contact matches "x"` | The `contact` in your mapping is not an exact company or full name. `punch-moneybird contacts` lists them. |
 | Entries stay queued and nothing is logged | `punch sync status` prints the last error verbatim. |
 | An entry never appears and never errors | Shorter than a minute. Moneybird rounds to whole minutes and needs at least one, so Punch marks those settled rather than queueing them forever. |
+| `moneybird-cli ... did not answer within 30s` | One call hit its deadline. The entry stays owed and is retried; raise `PUNCH_MONEYBIRD_TIMEOUT` on a slow link. |
+| `the Moneybird push did not finish within two minutes` | The service's watchdog cancelled the run. Nothing from it was recorded; the backoff retries. |
+| `expected a JSON array of at most 50 well-formed entries` | Only when driving the helper by hand: the input broke one of the bounds above. |
 
 To watch a push happen, run the pieces by hand — the pusher is a plain script
 and reads from a file as happily as from the service:
@@ -188,10 +242,12 @@ echo '[{"id":"t1","project":"fizzy","note":"test","start":1787700000,"end":17877
   | punch-moneybird push
 ```
 
-Two environment variables help when testing: `PUNCH_MONEYBIRD_CONFIG` points at
-a different mapping file, and `PUNCH_MONEYBIRD_CLI` points at a different
+Four environment variables help when testing: `PUNCH_MONEYBIRD_CONFIG` points
+at a different mapping file, `PUNCH_MONEYBIRD_CLI` points at a different
 binary — which is how the push path is exercised against a stub instead of a
-real administration.
+real administration — and `PUNCH_MONEYBIRD_TIMEOUT` and
+`PUNCH_MONEYBIRD_BUDGET` set the per-call deadline and the per-run budget in
+seconds.
 
 ## What this does not do
 

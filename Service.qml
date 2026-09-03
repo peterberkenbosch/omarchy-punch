@@ -21,13 +21,29 @@ Item {
   readonly property string dataDir: (Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")) + "/punch"
   readonly property string statePath: dataDir + "/state.json"
   readonly property string entriesPath: dataDir + "/entries.jsonl"
-  readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
-  readonly property string cliPath: sourceDir ? sourceDir + "/bin/punch" : "punch"
+
+  // The helpers live next to this file and are always run by absolute path,
+  // never looked up on PATH. The host stamps the source directory into the
+  // manifest; the resolved URL of this component is the same directory and
+  // covers a host that does not.
+  readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : localDir()
+  readonly property string cliPath: sourceDir + "/bin/punch"
+  readonly property string storeHelper: sourceDir + "/bin/punch-store"
+  readonly property string syncHelper: sourceDir + "/bin/punch-moneybird"
+
+  function localDir() {
+    var url = String(Qt.resolvedUrl("."))
+    if (url.indexOf("file://") === 0) url = url.substring(7)
+    return url.replace(/\/+$/, "")
+  }
 
   // { project, note, start } while the clock runs, null otherwise.
   property var running: null
   property var projects: []
   property var entries: []
+  // True once both files have been read from a healthy store. Nothing is
+  // written before that, and nothing is written after a read fails: the
+  // alternative is replacing a log we could not read with an empty one.
   property bool loaded: false
 
   // Ticks every second while running so the pill and hero stay live, and
@@ -137,6 +153,12 @@ Item {
   }
 
   // ------------------------------------------------------------- actions
+  //
+  // Every string that arrives here — from the switcher, the panel, the CLI,
+  // or anything else on the IPC target — goes through Model.cleanText and
+  // the LIMITS it enforces before it is kept, and every number is clamped.
+  // The model is the only place a bound is defined; this is where it is
+  // applied to input.
 
   function now() {
     return Math.floor(Date.now() / 1000)
@@ -151,7 +173,7 @@ Item {
   }
 
   function start(projectName, note, backdateMinutes) {
-    var name = String(projectName || "").trim() || lastProject
+    var name = Model.cleanText(projectName, Model.LIMITS.projectChars) || lastProject
     if (!name) return "no project"
 
     var at = now()
@@ -164,11 +186,11 @@ Item {
       closed = stopAt(at) !== null
     }
 
-    var backdate = Math.max(0, Math.floor(Number(backdateMinutes) || 0)) * 60
+    var backdate = Model.clampMinutes(backdateMinutes, Model.LIMITS.backdateMinutes) * 60
     var startAt = Math.max(at - backdate, earliestStart(), 0)
     if (startAt > at) startAt = at
 
-    running = { project: name, note: String(note || ""), start: startAt }
+    running = { project: name, note: Model.cleanText(note, Model.LIMITS.noteChars), start: startAt }
     projects = Model.touchProject(projects, name, at)
     if (closed) { persistEntries(); scheduleSync() }
     persistState()
@@ -200,9 +222,7 @@ Item {
     })
     running = null
     if (!entry) return null
-    var next = entries.slice()
-    next.push(entry)
-    entries = next
+    entries = Model.appendEntry(entries, entry)
     return entry
   }
 
@@ -234,7 +254,7 @@ Item {
   // up, which is what "I was away, do not bill that" actually means.
   function trim(minutes) {
     if (!running) return "stopped"
-    var away = Math.max(0, Math.floor(Number(minutes) || 0)) * 60
+    var away = Model.clampMinutes(minutes, Model.LIMITS.backdateMinutes) * 60
     if (away <= 0) return "nothing to trim"
 
     var at = now()
@@ -259,7 +279,7 @@ Item {
   // clock starts, which is the one moment you have nothing to say yet.
   function setNote(text) {
     if (!running) return "stopped"
-    var note = String(text || "").trim()
+    var note = Model.cleanText(text, Model.LIMITS.noteChars)
     if (note === running.note) return note ? note : "no note"
     running = { project: running.project, note: note, start: running.start }
     persistState()
@@ -268,7 +288,7 @@ Item {
   }
 
   function switchTo(projectName) {
-    var name = String(projectName || "").trim()
+    var name = Model.cleanText(projectName, Model.LIMITS.projectChars)
     if (!name) return "no project"
     return start(name, "", 0)
   }
@@ -290,7 +310,8 @@ Item {
   // ------------------------------------------------------------- editing
 
   function findEntry(id) {
-    for (var i = 0; i < entries.length; i++) if (entries[i].id === String(id)) return i
+    var key = Model.cleanText(id, 64)
+    for (var i = 0; i < entries.length; i++) if (entries[i].id === key) return i
     return -1
   }
 
@@ -309,10 +330,11 @@ Item {
   function adjustEntry(id, deltaMinutes) {
     var index = findEntry(id)
     if (index === -1) return "unknown entry"
-    var delta = Math.floor(Number(deltaMinutes) || 0) * 60
+    var delta = Math.floor(Number(deltaMinutes)) || 0
+    delta = Math.max(-Model.LIMITS.adjustMinutes, Math.min(Model.LIMITS.adjustMinutes, delta)) * 60
     var next = entries.slice()
     var entry = next[index]
-    var end = Math.max(entry.start + 60, entry.end + delta)
+    var end = Math.max(entry.start + 60, Math.min(entry.end + delta, entry.start + Model.LIMITS.spanSeconds))
     next[index] = Model.editedEntry(entry, { end: end })
     entries = next
     persistAll()
@@ -326,7 +348,7 @@ Item {
   function setEntryNote(id, text) {
     var index = findEntry(id)
     if (index === -1) return "unknown entry"
-    var note = String(text || "").trim()
+    var note = Model.cleanText(text, Model.LIMITS.noteChars)
     var entry = entries[index]
     if (entry.note === note) return note || "no note"
     var next = entries.slice()
@@ -339,7 +361,7 @@ Item {
 
   function reassignEntry(id, projectName) {
     var index = findEntry(id)
-    var name = String(projectName || "").trim()
+    var name = Model.cleanText(projectName, Model.LIMITS.projectChars)
     if (index === -1 || !name) return "unknown entry"
     var next = entries.slice()
     var entry = next[index]
@@ -373,7 +395,7 @@ Item {
 
   function csvSince(sinceText) {
     var from = 0
-    var text = String(sinceText || "").trim()
+    var text = Model.cleanText(sinceText, 32)
     if (text) {
       var parsed = Date.parse(text.length === 10 ? text + "T00:00:00" : text)
       if (!isNaN(parsed)) from = Math.floor(parsed / 1000)
@@ -382,12 +404,38 @@ Item {
   }
 
   // ------------------------------------------------------------- persistence
+  //
+  // Nothing in here touches the disk by pathname. bin/punch-store opens the
+  // data directory without following links, checks that it is ours and
+  // private, and reads or publishes each file relative to that held
+  // descriptor: a write lands in a fresh O_EXCL temp file, is fsynced, and
+  // is renamed into place, so state.json and entries.jsonl are always either
+  // the old text or the complete new text, and a link left at either name is
+  // replaced rather than written through. The helper also refuses to read a
+  // file over its byte ceiling, so a text never reaches this side unbounded.
+  //
+  // The two FileViews further down never load anything (preload: false).
+  // They are only the inotify hook that says a file changed under us, at
+  // which point the helper reads it again — which is how an edit made with
+  // a text editor is picked up.
 
-  // FileView writes come straight back as a file change. Remembering the
-  // exact text we wrote is what tells our own echo apart from a real edit
-  // made outside the shell, which we do want to pick up.
+  // The exact text we last sent, so a change event that is our own rename
+  // landing is told apart from an edit made outside the shell.
   property string _ownState: ""
   property string _ownEntries: ""
+  property string storeError: ""
+  property bool storeProblemNotified: false
+
+  property var readQueue: []
+  property bool stateRead: false
+  property bool entriesRead: false
+
+  // Text queued for the next write of each file; null when nothing is
+  // waiting. Writes are one at a time and the newest text wins, so a burst
+  // of edits costs one helper run per file, not one per keystroke.
+  property var pendingState: null
+  property var pendingEntries: null
+  property double lastWriteAt: 0
 
   function stateText() {
     return JSON.stringify({
@@ -398,15 +446,11 @@ Item {
   }
 
   function persistState() {
-    if (!loaded) return
-    _ownState = stateText()
-    stateFile.setText(_ownState)
+    queueWrite("state", stateText())
   }
 
   function persistEntries() {
-    if (!loaded) return
-    _ownEntries = Model.serializeEntries(entries)
-    entriesFile.setText(_ownEntries)
+    queueWrite("entries", Model.serializeEntries(entries))
   }
 
   function persistAll() {
@@ -414,26 +458,108 @@ Item {
     persistState()
   }
 
+  function queueWrite(which, text) {
+    if (!loaded) {
+      // A store that failed to read is asked again on every action, so
+      // fixing the directory brings persistence back without a reload.
+      requestRead("state")
+      requestRead("entries")
+      return
+    }
+    if (which === "state") { _ownState = text; pendingState = text }
+    else { _ownEntries = text; pendingEntries = text }
+    pumpWrites()
+  }
+
+  // Entries go before state: the finished entry belongs on disk before the
+  // running one that replaced it, or a crash in between double-bills.
+  function pumpWrites() {
+    if (storeWriter.running) return
+    var which = pendingEntries !== null ? "entries" : (pendingState !== null ? "state" : "")
+    if (!which) return
+    var text = which === "entries" ? pendingEntries : pendingState
+    if (which === "entries") pendingEntries = null
+    else pendingState = null
+    storeWriter.which = which
+    storeWriter.payload = text
+    storeWriter.stdinEnabled = true
+    storeWriter.command = [storeHelper, "write", which, String(Model.utf8Length(text))]
+    storeWriter.running = true
+  }
+
+  function finishWrite(which, exitCode, err) {
+    lastWriteAt = Date.now()
+    if (exitCode !== 0) reportStoreProblem(which, err || "punch-store write failed")
+    else storeError = ""
+    pumpWrites()
+  }
+
+  function requestRead(which) {
+    if (readQueue.indexOf(which) === -1) {
+      var next = readQueue.slice()
+      next.push(which)
+      readQueue = next
+    }
+    pumpReads()
+  }
+
+  function pumpReads() {
+    if (storeReader.running || !readQueue.length) return
+    var which = readQueue[0]
+    readQueue = readQueue.slice(1)
+    storeReader.which = which
+    storeReader.command = [storeHelper, "read", which]
+    storeReader.running = true
+  }
+
+  function finishRead(which, exitCode, text, err) {
+    if (exitCode !== 0) {
+      reportStoreProblem(which, err || "punch-store read failed")
+      if (loaded) loaded = false
+      pumpReads()
+      return
+    }
+    storeError = ""
+    storeProblemNotified = false
+    if (which === "state") {
+      if (text !== _ownState) applyState(text)
+      stateRead = true
+    } else {
+      if (text !== _ownEntries) applyEntries(text)
+      entriesRead = true
+    }
+    if (!loaded && stateRead && entriesRead) loaded = true
+    pumpReads()
+  }
+
+  // A change event that arrives while our own write is pending, in flight,
+  // or just landed is our own rename. Anything else is worth a read.
+  function fileChanged(which) {
+    var ours = which === "state" ? pendingState !== null : pendingEntries !== null
+    if (ours || storeWriter.running || Date.now() - lastWriteAt < 500) return
+    requestRead(which)
+  }
+
+  function reportStoreProblem(which, message) {
+    storeError = Model.cleanText(message, Model.LIMITS.syncErrorChars)
+    console.warn("punch: " + which + ": " + storeError)
+    if (storeProblemNotified) return
+    storeProblemNotified = true
+    Quickshell.execDetached([
+      omarchyPath + "/bin/omarchy-notification-send",
+      "-u", "critical",
+      "-g", "󰥔",
+      "Punch is not saving",
+      storeError
+    ])
+  }
+
   function applyState(raw) {
     var parsed = null
     try { parsed = JSON.parse(String(raw || "{}")) } catch (e) { parsed = null }
     if (!parsed || typeof parsed !== "object") parsed = {}
-
-    var list = Array.isArray(parsed.projects) ? parsed.projects : []
-    var cleaned = []
-    for (var i = 0; i < list.length; i++) {
-      var project = Model.sanitizeProject(list[i])
-      if (project) cleaned.push(project)
-    }
-    cleaned.sort(function(a, b) { return b.lastUsed - a.lastUsed })
-    projects = cleaned
-
-    var live = parsed.running
-    if (live && String(live.project || "").trim() && isFinite(Number(live.start))) {
-      running = { project: String(live.project).trim(), note: String(live.note || ""), start: Math.floor(Number(live.start)) }
-    } else {
-      running = null
-    }
+    projects = Model.sanitizeProjects(parsed.projects)
+    running = Model.sanitizeRunning(parsed.running, now())
     changed()
   }
 
@@ -442,37 +568,60 @@ Item {
     changed()
   }
 
+  Component.onCompleted: {
+    requestRead("state")
+    requestRead("entries")
+  }
+
   Process {
-    id: ensureDir
-    command: ["mkdir", "-p", root.dataDir]
-    running: true
-    onExited: {
-      root.loaded = true
-      stateFile.reload()
-      entriesFile.reload()
+    id: storeReader
+    property string which: ""
+    running: false
+    command: []
+    stdout: StdioCollector { id: storeReadOut; waitForEnd: true }
+    stderr: StdioCollector { id: storeReadErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.finishRead(which, exitCode, storeReadOut.text, storeReadErr.text)
+    }
+  }
+
+  Process {
+    id: storeWriter
+    property string which: ""
+    property string payload: ""
+    stdinEnabled: true
+    running: false
+    command: []
+    onStarted: {
+      write(payload)
+      payload = ""
+      // Closing stdin is what gives the helper its EOF. Doing it in the same
+      // handler as the write closed the channel before the write flushed;
+      // one turn of the event loop is enough. The helper checks the byte
+      // count it was told against what arrived, so a short payload is
+      // refused rather than published.
+      Qt.callLater(function() { storeWriter.stdinEnabled = false })
+    }
+    stderr: StdioCollector { id: storeWriteErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.finishWrite(which, exitCode, storeWriteErr.text)
     }
   }
 
   FileView {
-    id: stateFile
-    path: root.statePath
+    path: root.stateRead ? root.statePath : ""
+    preload: false
     watchChanges: true
-    atomicWrites: true
     printErrors: false
-    onLoaded: if (text() !== root._ownState) root.applyState(text())
-    onLoadFailed: root.applyState("")
-    onFileChanged: reload()
+    onFileChanged: root.fileChanged("state")
   }
 
   FileView {
-    id: entriesFile
-    path: root.entriesPath
+    path: root.entriesRead ? root.entriesPath : ""
+    preload: false
     watchChanges: true
-    atomicWrites: true
     printErrors: false
-    onLoaded: if (text() !== root._ownEntries) root.applyEntries(text())
-    onLoadFailed: root.applyEntries("")
-    onFileChanged: reload()
+    onFileChanged: root.fileChanged("entries")
   }
 
   Timer {
@@ -521,13 +670,36 @@ Item {
   }
 
   // ------------------------------------------------------------- moneybird
-
+  //
   // Entries are pushed to Moneybird by bin/punch-moneybird, a plain script
   // that shells out to the official moneybird-cli. Nothing about the network
   // lives in here: this half decides *when* to push and remembers what came
   // back, so a sync that goes wrong can still be run and read from a
   // terminal.
-  readonly property string syncHelper: sourceDir ? sourceDir + "/bin/punch-moneybird" : ""
+  //
+  // The process contract, and what each part of it is for:
+  //
+  //   - One push carries at most LIMITS.syncBatch entries and answers with
+  //     at most that many results. A backlog drains in rounds, so a run has
+  //     a bounded runtime and a bounded answer.
+  //   - The helper is started through `setsid --wait --fork`, so the process
+  //     Quickshell holds is a thin parent and the helper is the leader of
+  //     its own session. Quickshell kills that parent with SIGKILL when this
+  //     component is destroyed; the helper notices it has been orphaned
+  //     within half a second and tears down its own subprocess tree. That is
+  //     what makes a shell reload mid-push leave no moneybird-cli behind.
+  //   - Cancellation (the watchdog, or sync being switched off) is SIGTERM to
+  //     the parent, which the helper treats the same way, followed by SIGKILL
+  //     five seconds later if the parent has not gone. Every moneybird-cli
+  //     call inside the helper has its own deadline, and the run as a whole
+  //     has a budget, so the watchdog is the last fence, not the first.
+  //   - A cancelled or timed-out run records nothing, however far it got.
+  //     The helper's answer is only trusted from a run that exited on its
+  //     own, and only when it is the bounded JSON array the contract
+  //     promises; anything larger or stranger is a failure, not data.
+  //   - A run never starts while one is in flight. Restarting is: cancel,
+  //     wait for the exit, run again.
+
   readonly property var unsynced: Model.unsyncedEntries(entries)
   readonly property int pendingSync: unsynced.length
 
@@ -536,6 +708,7 @@ Item {
   property int lastSyncAt: 0
   property int syncFailures: 0
   property bool syncProblemNotified: false
+  property string syncCancelReason: ""
 
   function scheduleSync() {
     if (!syncEnabled) return
@@ -544,42 +717,70 @@ Item {
 
   function runSync() {
     if (!syncEnabled) return "moneybird sync is off"
-    if (!loaded || !syncHelper) return "not ready"
-    if (syncing) return "already syncing"
+    if (!loaded) return "not ready"
+    if (syncing || syncProcess.running) return "already syncing"
     var payload = Model.syncPayload(unsynced)
     if (!payload.length) return "nothing to sync"
 
     syncing = true
+    syncCancelReason = ""
     // Clear the old failure as the new attempt starts, or `punch sync status`
     // reports a stale reason while a run is still in flight.
     lastSyncError = ""
     syncRetry.stop()
+    syncKill.stop()
     syncWatchdog.restart()
     syncProcess.payload = JSON.stringify(payload)
-    syncProcess.command = [syncHelper, "push"]
+    // Quickshell closes stdin at start when this is false, and it is left
+    // false by the previous run, so a push after the first would otherwise
+    // hand the helper an empty payload.
+    syncProcess.stdinEnabled = true
+    syncProcess.command = ["setsid", "--wait", "--fork", syncHelper, "push"]
     syncProcess.running = true
     return "pushing " + payload.length + (payload.length === 1 ? " entry" : " entries")
+  }
+
+  function cancelSync(reason) {
+    if (!syncProcess.running) return
+    syncCancelReason = reason
+    syncProcess.signal(15)
+    syncKill.restart()
+  }
+
+  onSyncEnabledChanged: if (!syncEnabled) cancelSync("moneybird sync was switched off")
+
+  Component.onDestruction: {
+    // Quickshell follows this with SIGKILL on the parent; the helper handles
+    // either by tearing down its own tree.
+    if (syncProcess.running) syncProcess.signal(15)
   }
 
   function applySyncRun(exitCode, out, err) {
     syncing = false
     syncWatchdog.stop()
+    syncKill.stop()
 
-    var results = null
-    try { results = JSON.parse(String(out || "")) } catch (e) { results = null }
+    var cancelReason = syncCancelReason
+    var cancelled = cancelReason !== ""
+    syncCancelReason = ""
+    var results = cancelled ? null : Model.parseSyncResults(out)
 
     // Whatever did land is recorded even when the run as a whole failed, so a
     // partial push is never repeated against the entries that got through.
-    if (Array.isArray(results) && results.length) {
+    if (results && results.length) {
       entries = Model.applySyncResults(entries, results, now())
       persistEntries()
       changed()
     }
 
-    var failed = exitCode !== 0
-    var perEntry = Array.isArray(results) ? Model.syncErrors(results) : []
+    var failed = exitCode !== 0 || cancelled
+    if (!failed && results === null) {
+      failed = true
+      err = "punch-moneybird gave an answer that is not the bounded result list it promises"
+    }
+    var perEntry = results ? Model.syncErrors(results) : []
     if (failed) {
-      lastSyncError = String(err || out || "moneybird sync failed").replace(/\s+/g, " ").trim().substring(0, 200)
+      lastSyncError = Model.cleanText(cancelled ? cancelReason : (err || out || "moneybird sync failed"), Model.LIMITS.syncErrorChars)
     } else if (perEntry.length) {
       lastSyncError = perEntry[0]
     } else {
@@ -633,19 +834,22 @@ Item {
     onTriggered: root.runSync()
   }
 
-  // A push that never comes back would otherwise leave syncing stuck true and
-  // no further attempt ever scheduled — which is exactly what a helper
-  // waiting forever on stdin did. Kill it and treat it as a failure so the
-  // backoff takes over.
+  // The outer deadline. A push that never comes back would otherwise leave
+  // syncing stuck true and no further attempt ever scheduled.
   Timer {
     id: syncWatchdog
     interval: 120000
     repeat: false
-    onTriggered: {
-      if (!root.syncing) return
-      syncProcess.running = false
-      root.applySyncRun(1, "", "the Moneybird push did not finish within two minutes")
-    }
+    onTriggered: root.cancelSync("the Moneybird push did not finish within two minutes")
+  }
+
+  // A parent that ignored SIGTERM gets SIGKILL; the helper cleans up after
+  // either.
+  Timer {
+    id: syncKill
+    interval: 5000
+    repeat: false
+    onTriggered: if (syncProcess.running) syncProcess.signal(9)
   }
 
   Timer {
@@ -670,7 +874,7 @@ Item {
       // Closing stdin is what gives the child its EOF, and there is no
       // closeStdin in this Quickshell — dropping stdinEnabled is the only
       // lever. Doing it in the same handler as the write closed the channel
-      // before the write flushed, so the helper sat on `cat` forever and the
+      // before the write flushed, so the helper sat on stdin forever and the
       // sync never came back. One turn of the event loop is enough.
       Qt.callLater(function() { syncProcess.stdinEnabled = false })
     }
@@ -684,11 +888,15 @@ Item {
   // ------------------------------------------------------------- ipc
 
   // One target for the CLI and for anything else that wants to drive the
-  // clock — a hook, a keybind, an agent. Every method answers in one line.
+  // clock — a hook, a keybind, an agent. Every method answers in one line,
+  // and every argument is bounded before it is used (see the actions above).
   IpcHandler {
     target: "punch"
 
-    function status(): string { return Model.statusLine(root.running, root.elapsed) }
+    function status(): string {
+      var line = Model.statusLine(root.running, root.elapsed)
+      return root.storeError ? line + " [not saving: " + root.storeError + "]" : line
+    }
     function start(input: string): string { return root.startInput(input) }
     function stop(): string { return root.stop() }
     function toggle(): string { return root.toggle() }

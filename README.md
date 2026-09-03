@@ -127,7 +127,7 @@ Every subcommand is one IPC call into the running shell, so the terminal and the
 pill are never two copies of the truth.
 
 ```
-punch                     what is running right now
+punch                     what is running right now (and whether it is saving)
 punch start [text]        start (defaults to the last project; takes the grammar above)
 punch stop
 punch toggle
@@ -204,6 +204,14 @@ puts a tick on every row that has reached Moneybird.
 Entries are only ever **created** — editing or deleting one after it has synced
 does not propagate.
 
+A push is a subprocess with a contract: at most 50 entries in, at most 50
+results out, a deadline on every `moneybird-cli` call and a budget on the run,
+and a teardown of the whole process tree when the push is cancelled, times
+out, or the shell reloads underneath it. The entry note is handed to
+`moneybird-cli` as a command-line argument, because that is the only way it
+takes one, so it is visible in the process list for the length of that call.
+Details in [docs/moneybird.md](docs/moneybird.md#bounds-and-lifecycle).
+
 **[Full setup, mapping reference, and troubleshooting →](docs/moneybird.md)**
 
 ## Settings
@@ -236,6 +244,61 @@ Line-oriented on purpose, so the log stays greppable, diffable, and repairable
 without the shell. An entry that crosses midnight is stored once and clipped
 into both days when it is read, never counted twice.
 
+### How the files are touched
+
+The service never opens either file by pathname. Every read and write goes
+through `bin/punch-store`, a small Perl script (Perl is on every Omarchy
+install) that:
+
+- opens the data directory one component at a time without following
+  links, refuses an ancestor that is world-writable and not sticky, creates
+  the final directory `0700` if it is missing, and puts it back to `0700` if
+  it is not;
+- opens each file relative to that held directory descriptor, again without
+  following links, and refuses anything that is not a regular file owned by
+  you or that is over its byte ceiling;
+- publishes a write by filling a fresh `O_EXCL` temp file in the same
+  directory, fsyncing it, and renaming it over the target, then fsyncing the
+  directory. The file is always either the old text or the whole new text,
+  and a link left at its name is replaced rather than written through. The
+  service states the byte count it is sending and the helper refuses any
+  other length, so a broken pipe can never publish an empty log.
+
+If the helper refuses (a symlinked directory, a file that is not yours, a log
+over the ceiling), Punch keeps working in memory, stops writing, raises one
+notification, and `punch` reports `[not saving: ...]` after the status line.
+Persistence comes back on the next action once the directory is fixed.
+
+The shell only ever learns that a file changed under it through inotify; it
+then asks the helper to read it again. An edit you make with a text editor is
+picked up that way.
+
+### Limits
+
+Everything that comes in, from a keystroke, the CLI, the files, or Moneybird,
+is cut to these before it is kept. They live in one place, `LIMITS` at the
+top of `Model.js`, and the helpers quote the same numbers.
+
+| | |
+|---|---|
+| project name | 80 characters |
+| note | 500 characters |
+| a line typed into the switcher or `punch start` | 1000 characters |
+| known projects | 200, least recently used dropped first |
+| finished entries | 20,000, oldest dropped first |
+| `state.json` | 64 KiB |
+| `entries.jsonl` | 4 MiB |
+| entry length | one year; longer is discarded as junk |
+| backdate or trim | one week |
+| single `+`/`-` edit | one day |
+| rows drawn in the day panel | 200 newest |
+| projects listed in `punch today` / `week` | 200, then `... and N more` |
+| entries per Moneybird push | 50; a backlog drains in rounds |
+
+Control characters, including newlines, are replaced by spaces in every
+string, so the one-line answers over IPC and the line-per-entry log cannot be
+broken from the inside.
+
 ## Hacking on it
 
 Omarchy watches `~/.config/omarchy/plugins/` and reloads plugin code on save,
@@ -245,11 +308,19 @@ component. **Run `omarchy restart shell` after editing any QML in this plugin**,
 or you will spend a while debugging code that is not running.
 
 `Model.js` is Qt-free so the arithmetic that decides what gets billed can be
-checked without a compositor:
+checked without a compositor, and the two helpers are plain scripts that run
+against a throwaway directory and a stub `moneybird-cli`:
 
 ```bash
-node test/model-test.js
+bash test/run.sh          # all of the below
+node test/model-test.js   # durations, parsing, ranking, sync bookkeeping, limits
+bash test/store-test.sh   # punch-store: round trip, ceilings, links, FIFOs, modes
+bash test/moneybird-test.sh   # punch-moneybird: bounds, deadline, cancel, orphan teardown
 ```
+
+The Moneybird test starts a push against a CLI stub that hangs, then kills it
+three ways (its own deadline, SIGTERM, and SIGKILL of its parent) and checks
+that the stub and the child it spawned are gone each time.
 
 ## Not in this version
 

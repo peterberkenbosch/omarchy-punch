@@ -122,6 +122,63 @@ check("failures are reported", M.syncErrors([{ id: "a", error: "offline" }, { id
 check("sync survives serialization", M.parseEntries(M.serializeEntries(applied))[0].moneybird.id, "4965")
 check("garbage sync state is dropped", M.sanitizeEntry({ project: "x", start: 1, end: 99, moneybird: {} }).moneybird, undefined)
 
+// Bounds. Every string is cleaned and cut, every collection is capped, and
+// the caps are the ones LIMITS declares.
+var L = M.LIMITS
+var long = new Array(L.noteChars + 50).join("x")
+check("cleanText trims", M.cleanText("  hi  ", 10), "hi")
+check("cleanText strips control characters", M.cleanText("a\tb\nc\u0000d", 10), "a b c d")
+check("cleanText cuts", M.cleanText(long, 5), "xxxxx")
+check("cleanText handles null", M.cleanText(null, 5), "")
+check("utf8Length ascii", M.utf8Length("abc"), 3)
+check("utf8Length multibyte", M.utf8Length("é€😀"), 2 + 3 + 4)
+check("entry project is cut", M.sanitizeEntry({ project: long, start: 1, end: 100 }).project.length, L.projectChars)
+check("entry note is cut", M.sanitizeEntry({ project: "x", note: long, start: 1, end: 100 }).note.length, L.noteChars)
+check("entry rejects a year-long span", M.sanitizeEntry({ project: "x", start: 1, end: 1 + L.spanSeconds + 1 }), null)
+check("entry rejects far-future times", M.sanitizeEntry({ project: "x", start: L.maxEpoch + 1, end: L.maxEpoch + 2 }), null)
+check("entry rejects negative times", M.sanitizeEntry({ project: "x", start: -5, end: 5 }), null)
+check("running clamps a future start", M.sanitizeRunning({ project: "x", start: 5000 }, 4000).start, 4000)
+check("running rejects nameless", M.sanitizeRunning({ project: "\n", start: 5 }, 10), null)
+check("edit cannot smuggle a long note", M.editedEntry({ id: "a", project: "x", note: "", start: 1, end: 100 }, { note: long }).note.length, L.noteChars)
+check("edit cannot blank the project", M.editedEntry({ id: "a", project: "x", note: "", start: 1, end: 100 }, { project: "  " }).project, "x")
+check("quick input is cut", M.parseQuickInput(long + ": " + long).project.length, L.projectChars)
+check("quick input note is cut", M.parseQuickInput("acme: " + long).note.length, L.noteChars)
+check("quick input backdate is clamped", M.parseQuickInput("acme +9999").backdateMinutes <= L.backdateMinutes, true)
+check("clampMinutes", [M.clampMinutes("12", 10), M.clampMinutes(-3, 10), M.clampMinutes("x", 10)], [10, 0, 0])
+
+var crowd = []
+for (var c = 0; c < L.projects + 20; c++) crowd.push({ name: "p" + c, lastUsed: c })
+check("projects are capped to the most recent", M.sanitizeProjects(crowd).length, L.projects)
+check("the most recent survive", M.sanitizeProjects(crowd)[0].name, "p" + (L.projects + 19))
+check("touch keeps the cap", M.touchProject(M.sanitizeProjects(crowd), "new", 99999).length, L.projects)
+check("touch puts the new one first", M.touchProject(M.sanitizeProjects(crowd), "new", 99999)[0].name, "new")
+
+var lines = []
+for (var e = 0; e < L.entries + 5; e++) lines.push(JSON.stringify({ id: "e" + e, project: "x", start: e * 100, end: e * 100 + 50 }))
+var parsedLog = M.parseEntries(lines.join("\n"))
+check("log is capped", parsedLog.length, L.entries)
+check("log keeps the newest", parsedLog[parsedLog.length - 1].id, "e" + (L.entries + 4))
+check("log skips absurd lines", M.parseEntries(JSON.stringify({ project: "x", start: 1, end: 100, pad: long + long + long + long + long + long + long + long + long }) + "\n" + lines[0]).length, 1)
+check("append keeps the cap", M.appendEntry(parsedLog, { id: "z", project: "x", start: 1, end: 2 }).length, L.entries)
+check("append keeps the newest", M.appendEntry(parsedLog, { id: "z", project: "x", start: 1, end: 2 })[L.entries - 1].id, "z")
+
+var owed = []
+for (var o = 0; o < L.syncBatch + 10; o++) owed.push({ id: "o" + o, project: "x", note: "", start: o, end: o + 100 })
+check("one push carries one batch", M.syncPayload(owed).length, L.syncBatch)
+check("results over the batch are cut", M.parseSyncResults(JSON.stringify(owed)).length, L.syncBatch)
+check("results must be an array", M.parseSyncResults("{}"), null)
+check("results must parse", M.parseSyncResults("nope"), null)
+check("results have a size ceiling", M.parseSyncResults("[" + new Array(L.syncResultBytes).join(" ") + "]"), null)
+check("sync errors are cut", M.syncErrors([{ id: "a", error: long }])[0].length, L.syncErrorChars)
+check("sync reason is cut", M.sanitizeSync({ id: "1", reason: long }).reason.length, L.syncErrorChars)
+
+var many = []
+for (var m = 0; m < L.reportRows + 3; m++) many.push({ id: "m" + m, project: "proj" + m, note: "", start: m, end: m + 60 })
+var report = M.summaryLines(many, "ALL")
+check("report is capped", report.length, L.reportRows + 2)
+check("report says what it left out", report[L.reportRows], "... and 3 more")
+check("byProject is prototype-safe", M.byProject([{ project: "__proto__", start: 0, end: 60 }, { project: "constructor", start: 0, end: 60 }]).length, 2)
+
 // Status
 check("status stopped", M.statusLine(null, 0), "stopped")
 check("status running", M.statusLine({ project: "acme", note: "" }, 5040), "acme 1:24")

@@ -6,16 +6,44 @@
 # inside a QML service.
 #
 # Contract with the service:
-#   stdin   a JSON array of entries: [{id, project, note, start, end}, ...]
+#   stdin   a JSON array of at most MAX_ENTRIES entries:
+#           [{id, project, note, start, end}, ...]
 #           (or a file holding the same, passed as `push <file>`)
 #   stdout  a JSON array of results: [{id, moneybirdId, skipped, error}, ...]
+#           one per entry attempted, never more than MAX_ENTRIES
 #   exit    0 when the run completed (per-entry failures ride in the results),
 #           non-zero only when nothing could be attempted at all.
 #
 # The service owns entries.jsonl and is the only writer; this script never
 # touches it. It reports what happened and lets the service record it.
+#
+# Bounds and lifecycle, because this is the one place Punch talks to a
+# network and runs other people's programs:
+#
+#   - Input is read through a size cap and validated field by field before
+#     anything is done with it. The mapping file has a size cap too.
+#   - Every moneybird-cli call runs under timeout(1) with its own deadline
+#     and a hard kill after it, and its output is capped before it is read.
+#     The run as a whole has a budget; entries not reached stay owed and go
+#     out on the next run.
+#   - Calls run as background jobs this script waits on, so a SIGTERM is
+#     acted on at once: the call in flight is terminated (timeout forwards
+#     the signal to the process group it made for the call), the work
+#     directory is removed, and the script exits. SIGKILL cannot be caught;
+#     the call in flight then ends at its own deadline.
+#   - A guard notices when this script has been orphaned, which is what a
+#     shell reload mid-push looks like from here, and tears the run down
+#     the same way. Nothing outlives the service that started it by more
+#     than the poll interval plus one call deadline.
+#   - The description handed to moneybird-cli is passed as an argument,
+#     because that is the only way its `time_entries create` accepts one.
+#     It is visible in the process list for the length of the call, to
+#     other users on the same host where /proc is not mounted with hidepid.
+#     Notes are work descriptions for an invoice, not secrets.
 
 set -uo pipefail
+# A closed stdout must not end the script without its cleanup running.
+trap '' PIPE
 
 CONFIG="${PUNCH_MONEYBIRD_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/punch/moneybird.json}"
 CLI="${PUNCH_MONEYBIRD_CLI:-moneybird-cli}"
@@ -24,9 +52,97 @@ CLI="${PUNCH_MONEYBIRD_CLI:-moneybird-cli}"
 # minute between them, so anything shorter can never be represented there.
 MIN_SECONDS=60
 
+# Mirrors Model.js LIMITS: syncBatch, projectChars, noteChars.
+MAX_ENTRIES=50
+MAX_PROJECT_CHARS=80
+MAX_NOTE_CHARS=500
+MAX_INPUT_BYTES=1048576
+MAX_CONFIG_BYTES=65536
+MAX_API_BYTES=4194304
+MAX_ERROR_CHARS=200
+
+CLI_TIMEOUT="${PUNCH_MONEYBIRD_TIMEOUT:-30}"
+PUSH_BUDGET="${PUNCH_MONEYBIRD_BUDGET:-90}"
+[[ $CLI_TIMEOUT =~ ^[1-9][0-9]{0,3}$ ]] || CLI_TIMEOUT=30
+[[ $PUSH_BUDGET =~ ^[1-9][0-9]{0,4}$ ]] || PUSH_BUDGET=90
+
+WORK=""
+CHILD_PID=""
+GUARD_PID=""
+
+cleanup() {
+  trap - EXIT INT TERM HUP
+  if [[ -n $CHILD_PID ]]; then
+    # timeout(1) forwards TERM to the group it made for the call and, five
+    # seconds later, KILL. CHILD_PID is our own unreaped child throughout,
+    # so neither signal can land on a reused pid.
+    kill -TERM "$CHILD_PID" 2>/dev/null
+    for _ in $(seq 1 70); do
+      kill -0 "$CHILD_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL -- "-$CHILD_PID" "$CHILD_PID" 2>/dev/null
+    wait "$CHILD_PID" 2>/dev/null
+    CHILD_PID=""
+  fi
+  if [[ -n $GUARD_PID ]]; then
+    kill -TERM "$GUARD_PID" 2>/dev/null
+    wait "$GUARD_PID" 2>/dev/null
+    GUARD_PID=""
+  fi
+  [[ -n $WORK ]] && rm -rf -- "$WORK"
+}
+
 die() {
   echo "$1" >&2
   exit 1
+}
+
+# The pid a process currently has as its parent, from /proc, or nothing.
+parent_of() {
+  local line
+  read -r line < "/proc/$1/stat" 2>/dev/null || { echo ""; return; }
+  line=${line##*) }
+  set -- $line
+  echo "${2:-}"
+}
+
+# Runs beside the main script and terminates it the moment its parent
+# changes, which is what being orphaned looks like. The main script's trap
+# then does the actual teardown.
+guard_parent() {
+  local parent=$1 self=$2
+  while sleep 0.5; do
+    [[ $(parent_of "$self") == "$parent" ]] && continue
+    kill -TERM "$self" 2>/dev/null
+    exit 0
+  done
+}
+
+# Runs a command under a deadline as a background job and waits on it, so a
+# trapped signal interrupts the wait at once instead of after the call.
+# Output goes to a file; nothing about the call is captured through a
+# command substitution, which would put it in a subshell the trap cannot
+# reach.
+supervised() {
+  local seconds=$1 outfile=$2
+  shift 2
+  timeout --kill-after=5 "$seconds" "$@" > "$outfile" 2>&1 <&0 &
+  CHILD_PID=$!
+  wait "$CHILD_PID"
+  local status=$?
+  CHILD_PID=""
+  return "$status"
+}
+
+# Bytes in a file, without loading it.
+size_of() {
+  stat -c %s -- "$1" 2>/dev/null || echo 0
+}
+
+# Cut text to one line of at most MAX_ERROR_CHARS.
+one_line() {
+  tr '\n' ' ' <<<"$1" | sed 's/  */ /g' | cut -c1-"$MAX_ERROR_CHARS"
 }
 
 usage() {
@@ -51,7 +167,21 @@ Configuration lives in ~/.config/punch/moneybird.json:
 
 A Punch project with no entry here is matched against Moneybird projects by
 name. Set "project" to null to send the entry with no project attached.
+
+Environment: PUNCH_MONEYBIRD_TIMEOUT seconds per moneybird-cli call (30),
+PUNCH_MONEYBIRD_BUDGET seconds per push (90), PUNCH_MONEYBIRD_CONFIG and
+PUNCH_MONEYBIRD_CLI to point at another mapping file or binary.
 USAGE
+}
+
+start_run() {
+  WORK=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/punch-moneybird.XXXXXX") || die "cannot create a work directory"
+  trap cleanup EXIT
+  trap 'cleanup; exit 143' TERM
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 129' HUP
+  guard_parent "$PPID" "$$" &
+  GUARD_PID=$!
 }
 
 require_cli() {
@@ -61,20 +191,26 @@ require_cli() {
   # `administration current` only reads local config, so it says "logged in"
   # for a token the API has since rejected. Whether the token still works is
   # a question only the API can answer.
-  "$CLI" administration current >/dev/null 2>&1 ||
+  supervised "$CLI_TIMEOUT" "$WORK/admin" "$CLI" administration current ||
     die "moneybird-cli is not logged in. Run: moneybird-cli login <token>"
 }
 
 # Every API read goes through here so a failure arrives as the reason it
-# happened rather than as an empty list. moneybird-cli reports auth trouble on
-# stdout and can still exit 0, so the text has to be inspected as well.
-api() {
-  local out status
-  out=$("$CLI" "$@" --output raw 2>&1)
+# happened rather than as an empty list. The answer lands in a file, capped;
+# moneybird-cli reports auth trouble on stdout and can still exit 0, so the
+# text has to be inspected as well.
+api_to() {
+  local outfile=$1
+  shift
+  local status peek
+  supervised "$CLI_TIMEOUT" "$outfile" "$CLI" "$@" --output raw
   status=$?
-  if ((status != 0)) || [[ $out == Error:* ]]; then
+  ((status == 124)) && die "moneybird-cli $1 $2 did not answer within ${CLI_TIMEOUT}s"
+  (($(size_of "$outfile") > MAX_API_BYTES)) && die "moneybird-cli $1 $2 answered with more than $MAX_API_BYTES bytes; not reading it"
+  peek=$(head -c 256 -- "$outfile")
+  if ((status != 0)) || [[ $peek == Error:* ]]; then
     local reason
-    reason=$(tr '\n' ' ' <<<"$out" | sed 's/  */ /g' | cut -c1-220)
+    reason=$(one_line "$(head -c 1024 -- "$outfile")")
     case "$reason:$1" in
     # Moneybird answers 401 both for a token it does not know and for one that
     # is fine but not allowed here, and moneybird-cli reports them
@@ -88,55 +224,59 @@ api() {
     *) die "moneybird-cli $1 $2 failed: $reason" ;;
     esac
   fi
-  printf '%s' "$out"
+  jq -e 'type == "array" or type == "object"' "$outfile" >/dev/null 2>&1 ||
+    die "moneybird-cli $1 $2 did not answer with JSON"
 }
 
-config_json() {
+load_config() {
   if [[ -f $CONFIG ]]; then
-    jq '.' "$CONFIG" 2>/dev/null || die "$CONFIG is not valid JSON"
+    (($(size_of "$CONFIG") > MAX_CONFIG_BYTES)) && die "$CONFIG is larger than $MAX_CONFIG_BYTES bytes"
+    jq '.' -- "$CONFIG" > "$WORK/config" 2>/dev/null || die "$CONFIG is not valid JSON"
   else
-    echo '{}'
+    echo '{}' > "$WORK/config"
   fi
 }
 
 # The token belongs to one user, but the API only offers the whole list, so
 # fall back to the single real person when there is exactly one. Anything
 # ambiguous is the user's call, not a guess this script should make.
+# Sets USER_ID; returns 1 when it cannot be resolved.
 resolve_user_id() {
-  local configured
-  configured=$(config_json | jq -r '.userId // "" | tostring')
-  if [[ -n $configured && $configured != "null" ]]; then
-    echo "$configured"
+  USER_ID=$(jq -r '.userId // "" | tostring' "$WORK/config")
+  if [[ -n $USER_ID && $USER_ID != "null" ]]; then
+    [[ $USER_ID =~ ^[0-9]{1,32}$ ]] || die "userId in $CONFIG is not a Moneybird id"
     return 0
   fi
 
-  local users count
-  users=$(api users list)
-  count=$(jq '[.[] | select((.permissions // []) | index("time_entries"))] | length' <<<"$users" 2>/dev/null)
+  api_to "$WORK/users" users list
+  local count
+  count=$(jq '[.[] | select((.permissions // []) | index("time_entries"))] | length' "$WORK/users" 2>/dev/null)
   if [[ ${count:-0} == 1 ]]; then
-    jq -r '[.[] | select((.permissions // []) | index("time_entries"))][0].id' <<<"$users"
+    USER_ID=$(jq -r '[.[] | select((.permissions // []) | index("time_entries"))][0].id' "$WORK/users")
     return 0
   fi
-  count=$(jq 'length' <<<"$users" 2>/dev/null)
+  count=$(jq 'length' "$WORK/users" 2>/dev/null)
   if [[ ${count:-0} == 1 ]]; then
-    jq -r '.[0].id' <<<"$users"
+    USER_ID=$(jq -r '.[0].id' "$WORK/users")
     return 0
   fi
   return 1
 }
 
 fetch_projects() {
-  api projects list
+  api_to "$WORK/projects" projects list
 }
 
+# Sets CONTACT_ID to the Moneybird contact matching the name, or "".
 find_contact_id() {
   local name="$1"
+  CONTACT_ID=""
   [[ -n $name ]] || return 1
-  api contacts list --query "$name" |
-    jq -r --arg n "$name" '
+  api_to "$WORK/contact" contacts list --query "$name"
+  CONTACT_ID=$(jq -r --arg n "$name" '
       [ .[] | select(((.company_name // "") | ascii_downcase) == ($n | ascii_downcase)
                   or (((.firstname // "") + " " + (.lastname // "")) | ltrimstr(" ") | rtrimstr(" ") | ascii_downcase) == ($n | ascii_downcase)) ]
-      | if length > 0 then .[0].id else empty end'
+      | if length > 0 then .[0].id else "" end' "$WORK/contact")
 }
 
 case "${1:-}" in
@@ -145,18 +285,23 @@ case "${1:-}" in
   exit 0
   ;;
 contacts)
+  start_run
   require_cli
-  api contacts list | jq -r '.[] | "\(.id)\t\(.company_name // ((.firstname // "") + " " + (.lastname // "")))"'
+  api_to "$WORK/list" contacts list
+  jq -r '.[] | "\(.id)\t\(.company_name // ((.firstname // "") + " " + (.lastname // "")))"' "$WORK/list"
   exit 0
   ;;
 projects)
+  start_run
   require_cli
-  fetch_projects | jq -r '.[] | "\(.id)\t\(.name)\t\(.state)"'
+  fetch_projects
+  jq -r '.[] | "\(.id)\t\(.name)\t\(.state)"' "$WORK/projects"
   exit 0
   ;;
 doctor)
+  start_run
   require_cli
-  echo "administration: $("$CLI" administration current 2>&1 | head -1)"
+  echo "administration: $(head -1 -- "$WORK/admin")"
 
   # Which endpoints the token may read, one line each. A token can be
   # perfectly valid and still be missing exactly the scope this needs, and
@@ -165,7 +310,7 @@ doctor)
   echo "Access:"
   scope_missing=0
   for resource in contacts time_entries projects users; do
-    if "$CLI" "$resource" list --output raw >/dev/null 2>&1; then
+    if supervised "$CLI_TIMEOUT" "$WORK/probe" "$CLI" "$resource" list --output raw; then
       printf '  %-14s ok\n' "$resource"
     else
       printf '  %-14s no\n' "$resource"
@@ -182,19 +327,21 @@ doctor)
   echo
   # Proves the token before reporting anything that depends on it, so a dead
   # token reads as a dead token instead of an account with no projects.
-  api users list >/dev/null
-  if user_id=$(resolve_user_id); then
-    echo "user id:        $user_id"
+  api_to "$WORK/users" users list
+  load_config
+  if resolve_user_id; then
+    echo "user id:        $USER_ID"
   else
     echo "user id:        UNRESOLVED — more than one candidate; set \"userId\" in $CONFIG"
     echo
     echo "Users who can track time:"
-    api users list | jq -r '.[] | select((.permissions // []) | index("time_entries")) | "  \(.id)  \(.name // .email // "?")"'
+    jq -r '.[] | select((.permissions // []) | index("time_entries")) | "  \(.id)  \(.name // .email // "?")"' "$WORK/users"
   fi
   echo "config:         $CONFIG$([[ -f $CONFIG ]] || echo ' (missing, defaults apply)')"
   echo
   echo "Moneybird projects:"
-  fetch_projects | jq -r '.[] | "  \(.name)  [\(.state)]"'
+  fetch_projects
+  jq -r '.[] | "  \(.name)  [\(.state)]"' "$WORK/projects"
   exit 0
   ;;
 push) ;;
@@ -206,56 +353,88 @@ esac
 
 # ---------------------------------------------------------------- push
 
-require_cli
+start_run
 
-# Prove the token before anything else runs. resolve_user_id and the mapping
-# lookups all happen inside command substitutions, where `die` only kills the
-# subshell — so an auth failure discovered down there surfaced twice: once as
-# itself, and once as whatever the caller made of the empty result.
-api users list >/dev/null
-
+# Read the input first, through the cap, so a helper started with nothing to
+# do costs no API call. Ten seconds is generous for a pipe the service
+# closes as soon as it has written.
 if [[ -n ${2:-} ]]; then
   [[ -f $2 ]] || die "no such file: $2"
-  entries=$(cat "$2")
+  (($(size_of "$2") > MAX_INPUT_BYTES)) && die "$2 is larger than $MAX_INPUT_BYTES bytes"
+  head -c "$MAX_INPUT_BYTES" -- "$2" > "$WORK/in"
 else
-  entries=$(cat)
+  supervised 10 "$WORK/in" head -c $((MAX_INPUT_BYTES + 1))
+  (($(size_of "$WORK/in") > MAX_INPUT_BYTES)) && die "refusing more than $MAX_INPUT_BYTES bytes of entries"
 fi
-[[ -n $entries ]] || { echo '[]'; exit 0; }
-jq -e 'type == "array"' >/dev/null 2>&1 <<<"$entries" || die "expected a JSON array of entries on stdin"
-count=$(jq 'length' <<<"$entries")
+# Nothing after this point reads stdin; the calls below must not either.
+exec </dev/null
+
+if [[ ! -s $WORK/in ]] || ! grep -q '[^[:space:]]' "$WORK/in"; then
+  echo '[]'
+  exit 0
+fi
+
+# One pass that admits only what the contract describes: a short array of
+# objects with a bounded id, project and note, sane times, and no control
+# characters in anything that will become an argument.
+jq -e --argjson max "$MAX_ENTRIES" --argjson p "$MAX_PROJECT_CHARS" --argjson n "$MAX_NOTE_CHARS" '
+  type == "array" and length <= $max and all(.[];
+    type == "object"
+    and (.id | type == "string" and length > 0 and length <= 64 and (explode | all(. >= 32 and . != 127)))
+    and (.project | type == "string" and length > 0 and length <= $p and (explode | all(. >= 32 and . != 127)))
+    and ((.note // "") | type == "string" and length <= $n and (explode | all(. >= 32 and . != 127)))
+    and (.start | type == "number" and . >= 0 and . < 4102444800)
+    and (.end | type == "number" and . > 0 and . < 4102444800)
+    and .end > .start)' "$WORK/in" >/dev/null 2>&1 ||
+  die "expected a JSON array of at most $MAX_ENTRIES well-formed entries on stdin"
+count=$(jq 'length' "$WORK/in")
 [[ $count -gt 0 ]] || { echo '[]'; exit 0; }
 
-user_id=$(resolve_user_id) ||
+require_cli
+
+# Prove the token before anything else runs, so an auth failure surfaces
+# once, as itself.
+api_to "$WORK/users" users list
+
+load_config
+resolve_user_id ||
   die "could not work out which Moneybird user to book time for. Set \"userId\" in $CONFIG (see: punch-moneybird doctor)."
 
-config=$(config_json)
-default_billable=$(jq -r 'if .defaultBillable == false then "false" else "true" end' <<<"$config")
-projects_json=$(fetch_projects)
+default_billable=$(jq -r 'if .defaultBillable == false then "false" else "true" end' "$WORK/config")
+fetch_projects
 
 declare -A CONTACT_CACHE
 
 results="[]"
+add_result() {
+  results=$(jq -c --arg id "$id" --arg mb "${1:-}" --argjson skipped "${2:-false}" --arg err "${3:-}" \
+    '. + [{id: $id, moneybirdId: (if $mb == "" then null else $mb end), skipped: $skipped, error: (if $err == "" then null else $err end)}]' \
+    <<<"$results")
+}
+
 for ((i = 0; i < count; i++)); do
-  entry=$(jq -c ".[$i]" <<<"$entries")
+  # The budget is for the run, not the call: an entry that was not reached
+  # is simply not in the results and goes out next time.
+  if ((SECONDS >= PUSH_BUDGET)); then
+    echo "stopping after ${SECONDS}s; $((count - i)) entries left for the next run" >&2
+    break
+  fi
+
+  entry=$(jq -c ".[$i]" "$WORK/in")
   id=$(jq -r '.id' <<<"$entry")
   punch_project=$(jq -r '.project' <<<"$entry")
   note=$(jq -r '.note // ""' <<<"$entry")
-  start=$(jq -r '.start' <<<"$entry")
-  end=$(jq -r '.end' <<<"$entry")
-
-  add_result() {
-    results=$(jq -c --arg id "$id" --arg mb "${1:-}" --argjson skipped "${2:-false}" --arg err "${3:-}" \
-      '. + [{id: $id, moneybirdId: (if $mb == "" then null else $mb end), skipped: $skipped, error: (if $err == "" then null else $err end)}]' \
-      <<<"$results")
-  }
+  start=$(jq -r '.start | floor' <<<"$entry")
+  end=$(jq -r '.end | floor' <<<"$entry")
 
   if ((end - start < MIN_SECONDS)); then
     add_result "" true "shorter than the minute Moneybird can represent"
     continue
   fi
 
-  mapping=$(jq -c --arg p "$punch_project" '.projects[$p] // {}' <<<"$config")
+  mapping=$(jq -c --arg p "$punch_project" '.projects[$p] // {}' "$WORK/config")
   billable=$(jq -r --arg d "$default_billable" 'if has("billable") then (.billable | tostring) else $d end' <<<"$mapping")
+  [[ $billable == true || $billable == false ]] || billable=$default_billable
 
   # An explicit null means "book this without a project"; anything else falls
   # back to matching the Punch project name against Moneybird's.
@@ -269,23 +448,24 @@ for ((i = 0; i < count; i++)); do
   if jq -e 'has("project") and .project == null' >/dev/null <<<"$mapping"; then
     project_id=""
   else
-    project_name=$(jq -r --arg p "$punch_project" '.project // $p' <<<"$mapping")
+    project_name=$(jq -r --arg p "$punch_project" '.project // $p | tostring' <<<"$mapping" | cut -c1-"$MAX_PROJECT_CHARS")
     project_id=$(jq -r --arg n "$project_name" \
-      '[ .[] | select((.name // "" | ascii_downcase) == ($n | ascii_downcase)) ] | if length > 0 then .[0].id else "" end' \
-      <<<"$projects_json")
+      '[ .[] | select((.name // "" | ascii_downcase) == ($n | ascii_downcase)) ] | if length > 0 then (.[0].id | tostring) else "" end' \
+      "$WORK/projects")
     if [[ -z $project_id ]]; then
       add_result "" false "no Moneybird project named \"$project_name\" — map \"$punch_project\" in $CONFIG"
       continue
     fi
   fi
 
-  contact_name=$(jq -r '.contact // ""' <<<"$mapping")
+  contact_name=$(jq -r '.contact // "" | tostring' <<<"$mapping" | cut -c1-"$MAX_PROJECT_CHARS")
   contact_id=""
   if [[ -n $contact_name ]]; then
     if [[ -n ${CONTACT_CACHE[$contact_name]:-} ]]; then
       contact_id=${CONTACT_CACHE[$contact_name]}
     else
-      contact_id=$(find_contact_id "$contact_name")
+      find_contact_id "$contact_name"
+      contact_id=$CONTACT_ID
       if [[ -z $contact_id ]]; then
         add_result "" false "no Moneybird contact matches \"$contact_name\""
         continue
@@ -298,7 +478,7 @@ for ((i = 0; i < count; i++)); do
   [[ -n $description ]] || description=$punch_project
 
   args=(time_entries create
-    --user_id "$user_id"
+    --user_id "$USER_ID"
     --started_at "$(date -d "@$start" --iso-8601=seconds)"
     --ended_at "$(date -d "@$end" --iso-8601=seconds)"
     --description "$description"
@@ -306,14 +486,20 @@ for ((i = 0; i < count; i++)); do
   [[ -n $project_id ]] && args+=(--project_id "$project_id")
   [[ -n $contact_id ]] && args+=(--contact_id "$contact_id")
 
-  if ! response=$("$CLI" "${args[@]}" --output raw 2>&1); then
-    add_result "" false "$(tr '\n' ' ' <<<"$response" | cut -c1-200)"
+  supervised "$CLI_TIMEOUT" "$WORK/create" "$CLI" "${args[@]}" --output raw
+  status=$?
+  if ((status == 124)); then
+    add_result "" false "moneybird-cli did not answer within ${CLI_TIMEOUT}s"
+    continue
+  fi
+  if ((status != 0)) || (($(size_of "$WORK/create") > MAX_API_BYTES)); then
+    add_result "" false "$(one_line "$(head -c 1024 -- "$WORK/create")")"
     continue
   fi
 
-  moneybird_id=$(jq -r '.id // empty' <<<"$response" 2>/dev/null)
+  moneybird_id=$(jq -r '.id // empty | tostring' "$WORK/create" 2>/dev/null | cut -c1-64)
   if [[ -z $moneybird_id ]]; then
-    add_result "" false "$(tr '\n' ' ' <<<"$response" | cut -c1-200)"
+    add_result "" false "$(one_line "$(head -c 1024 -- "$WORK/create")")"
     continue
   fi
 

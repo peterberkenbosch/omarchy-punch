@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "pb.punch",
   "name": "Punch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Peter Berkenbosch",
   "license": "MIT",
   "description": "Fast time tracking in the Omarchy bar: one pill that is the running timer, a keyboard quick switcher, and a day panel.",

@@ -44,7 +44,8 @@ Item {
   // Today's totals, so the list answers "how long have I been on this
   // already" at the same moment it asks which project you want.
   readonly property var todayByProject: {
-    var map = ({})
+    // Null prototype: a project named "constructor" is a project.
+    var map = Object.create(null)
     if (!service) return map
     var totals = Model.byProject(service.todayEntries)
     for (var i = 0; i < totals.length; i++) map[totals[i].project.toLowerCase()] = totals[i].seconds
