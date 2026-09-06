@@ -264,10 +264,22 @@ install) that:
   service states the byte count it is sending and the helper refuses any
   other length, so a broken pipe can never publish an empty log.
 
+The helper is started as a direct child with a cleared environment: only
+`HOME` and `XDG_DATA_HOME` cross over, so nothing the shell inherited (a
+`PERL5OPT` or `PERL5LIB` exported by a login script, which perl acts on
+before the script's first line) reaches it, and it refuses to run if any
+`PERL*` variable does. Every run has a deadline: the helper gives up on its
+own after 20 seconds, and the service keeps a 30-second fence on top,
+`SIGTERM` then `SIGKILL`. A run that hit either is a failed read or write,
+nothing more; a write cut off leaves at most a temp file that the next write
+sweeps, never a half-published file. A shell reload sends both processes
+`SIGTERM` and Quickshell follows with `SIGKILL`.
+
 If the helper refuses (a symlinked directory, a file that is not yours, a log
-over the ceiling), Punch keeps working in memory, stops writing, raises one
-notification, and `punch` reports `[not saving: ...]` after the status line.
-Persistence comes back on the next action once the directory is fixed.
+over the ceiling, a run past its deadline), Punch keeps working in memory,
+stops writing, raises one notification, and `punch` reports
+`[not saving: ...]` after the status line. Persistence comes back on the next
+action once the directory is fixed.
 
 The shell only ever learns that a file changed under it through inotify; it
 then asks the helper to read it again. An edit you make with a text editor is
@@ -297,7 +309,9 @@ top of `Model.js`, and the helpers quote the same numbers.
 
 Control characters, including newlines, are replaced by spaces in every
 string, so the one-line answers over IPC and the line-per-entry log cannot be
-broken from the inside.
+broken from the inside. Every `Text` in the pill, the panel and the switcher
+is drawn as `Text.PlainText`, so a project name or note that looks like
+markup is shown as typed, not interpreted.
 
 ## Hacking on it
 
@@ -314,7 +328,7 @@ against a throwaway directory and a stub `moneybird-cli`:
 ```bash
 bash test/run.sh          # all of the below
 node test/model-test.js   # durations, parsing, ranking, sync bookkeeping, limits
-bash test/store-test.sh   # punch-store: round trip, ceilings, links, FIFOs, modes
+bash test/store-test.sh   # punch-store: round trip, ceilings, links, FIFOs, modes, clean env, deadline
 bash test/moneybird-test.sh   # punch-moneybird: bounds, deadline, cancel, orphan teardown
 ```
 

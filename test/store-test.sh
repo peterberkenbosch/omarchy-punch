@@ -8,6 +8,11 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 STORE=$PWD/bin/punch-store
 
+# The helper is run the way the service runs it: a cleared environment with
+# HOME and XDG_DATA_HOME only. STORE_EXTRA adds a variable for one call.
+STORE_EXTRA=
+store() { env -i HOME="$HOME" XDG_DATA_HOME="$XDG_DATA_HOME" $STORE_EXTRA "$STORE" "$@"; }
+
 failures=0
 fail() { echo "FAIL $1"; failures=$((failures + 1)); }
 pass() { :; }
@@ -17,71 +22,85 @@ trap 'chmod -R u+rwx "$ROOT" 2>/dev/null; rm -rf "$ROOT"' EXIT
 export XDG_DATA_HOME=$ROOT/data
 DIR=$XDG_DATA_HOME/punch
 # Only the final directory is ever created; a missing data home is an error.
-"$STORE" read state >/dev/null 2>&1 && fail "a missing XDG_DATA_HOME should be refused, not created"
+store read state >/dev/null 2>&1 && fail "a missing XDG_DATA_HOME should be refused, not created"
 mkdir "$XDG_DATA_HOME"
 
 # --- a fresh install: read yields nothing, the directory is created private
-out=$("$STORE" read state 2>&1); rc=$?
+out=$(store read state 2>&1); rc=$?
 [[ $rc -eq 0 && -z $out ]] || fail "read of a missing file should print nothing and exit 0 (rc=$rc out=$out)"
 [[ $(stat -c %a "$DIR") == 700 ]] || fail "data directory should be created 0700"
 
 # --- round trip, and the file is private
-printf '{"version":1}\n' | "$STORE" write state 14 || fail "write should succeed"
-[[ $("$STORE" read state) == '{"version":1}' ]] || fail "read should return what was written"
+printf '{"version":1}\n' | store write state 14 || fail "write should succeed"
+[[ $(store read state) == '{"version":1}' ]] || fail "read should return what was written"
 [[ $(stat -c %a "$DIR/state.json") == 600 ]] || fail "written file should be 0600"
 [[ -z $(ls -A "$DIR" | grep '\.tmp\.') ]] || fail "no temp file should be left behind"
 
 # --- the byte-count contract refuses a short or long payload
-printf 'short' | "$STORE" write state 14 2>/dev/null && fail "a payload shorter than announced should be refused"
-printf 'far too long for six' | "$STORE" write state 6 2>/dev/null && fail "a payload longer than announced should be refused"
-[[ $("$STORE" read state) == '{"version":1}' ]] || fail "a refused write should leave the old text in place"
+printf 'short' | store write state 14 2>/dev/null && fail "a payload shorter than announced should be refused"
+printf 'far too long for six' | store write state 6 2>/dev/null && fail "a payload longer than announced should be refused"
+[[ $(store read state) == '{"version":1}' ]] || fail "a refused write should leave the old text in place"
 
 # --- the byte ceilings
-head -c 65537 /dev/zero | tr '\0' 'x' | "$STORE" write state 65537 2>/dev/null && fail "a state over 64 KiB should be refused"
+head -c 65537 /dev/zero | tr '\0' 'x' | store write state 65537 2>/dev/null && fail "a state over 64 KiB should be refused"
 head -c 65537 /dev/zero | tr '\0' 'x' > "$DIR/state.json"
-"$STORE" read state >/dev/null 2>&1 && fail "a state over 64 KiB on disk should not be loaded"
-printf '{}' | "$STORE" write state 2 || fail "the ceiling should be recoverable by writing a small file"
+store read state >/dev/null 2>&1 && fail "a state over 64 KiB on disk should not be loaded"
+printf '{}' | store write state 2 || fail "the ceiling should be recoverable by writing a small file"
 
 # --- a link at the file's name is never followed on read
 ln -sf /etc/hostname "$DIR/entries.jsonl"
-"$STORE" read entries >/dev/null 2>&1 && fail "a symlinked entries file should be refused on read"
+store read entries >/dev/null 2>&1 && fail "a symlinked entries file should be refused on read"
 # ...and is replaced, not written through, on write
-printf 'x\n' | "$STORE" write entries 2 || fail "write over a symlink should succeed by replacing it"
+printf 'x\n' | store write entries 2 || fail "write over a symlink should succeed by replacing it"
 [[ ! -L $DIR/entries.jsonl && $(cat "$DIR/entries.jsonl") == x ]] || fail "write should replace the link with a plain file"
 [[ -s /etc/hostname || ! -e /etc/hostname ]] || fail "the link target must be untouched"
 
 # --- a FIFO at the file's name is refused instead of blocking
 rm -f "$DIR/entries.jsonl"; mkfifo "$DIR/entries.jsonl"
-timeout 5 "$STORE" read entries >/dev/null 2>&1; rc=$?
+timeout 5 env -i HOME="$HOME" XDG_DATA_HOME="$XDG_DATA_HOME" "$STORE" read entries >/dev/null 2>&1; rc=$?
 [[ $rc -eq 1 ]] || fail "a FIFO should be refused promptly (rc=$rc)"
 rm -f "$DIR/entries.jsonl"
 
 # --- a data directory that is a link is refused
 mv "$DIR" "$ROOT/elsewhere"; ln -s "$ROOT/elsewhere" "$DIR"
-"$STORE" read state >/dev/null 2>&1 && fail "a symlinked data directory should be refused"
-printf '{}' | "$STORE" write state 2 2>/dev/null && fail "a symlinked data directory should refuse writes"
+store read state >/dev/null 2>&1 && fail "a symlinked data directory should be refused"
+printf '{}' | store write state 2 2>/dev/null && fail "a symlinked data directory should refuse writes"
 rm "$DIR"; mv "$ROOT/elsewhere" "$DIR"
 
 # --- a data directory that is too open is made private again
 chmod 755 "$DIR"
-"$STORE" read state >/dev/null || fail "read should still work on a 0755 directory"
+store read state >/dev/null || fail "read should still work on a 0755 directory"
 [[ $(stat -c %a "$DIR") == 700 ]] || fail "the directory should be brought back to 0700"
 
 # --- a world-writable ancestor without the sticky bit is refused
 chmod 777 "$XDG_DATA_HOME"
-"$STORE" read state >/dev/null 2>&1 && fail "a world-writable ancestor should be refused"
+store read state >/dev/null 2>&1 && fail "a world-writable ancestor should be refused"
 chmod 1777 "$XDG_DATA_HOME"
-"$STORE" read state >/dev/null || fail "a sticky world-writable ancestor (like /tmp) is fine"
+store read state >/dev/null || fail "a sticky world-writable ancestor (like /tmp) is fine"
 chmod 700 "$XDG_DATA_HOME"
 
 # --- stale temp files from a crashed run are swept on the next write
 touch -d '2 hours ago' "$DIR/.state.json.tmp.999999"
-printf '{}' | "$STORE" write state 2 || fail "write should succeed alongside a stale temp"
+printf '{}' | store write state 2 || fail "write should succeed alongside a stale temp"
 [[ ! -e $DIR/.state.json.tmp.999999 ]] || fail "a stale temp file should be swept"
 
+# --- a Perl loader variable in the environment is refused, whatever it says
+STORE_EXTRA=PERL5LIB=/nonexistent store read state >/dev/null 2>&1 && fail "a Perl loader variable in the environment should be refused"
+out=$(STORE_EXTRA=PERL5OPT=-w store read state 2>&1)
+[[ $out == *PERL5OPT* ]] || fail "the refusal should name the variable (got: $out)"
+[[ $(store read state) == '{}' ]] || fail "the store should work again once the variable is gone"
+
+# --- a caller that never closes stdin is given up on, not waited for
+mkfifo "$ROOT/hold"; exec 3<>"$ROOT/hold"
+err=$(timeout 5 env -i HOME="$HOME" XDG_DATA_HOME="$XDG_DATA_HOME" PUNCH_STORE_TIMEOUT=1 "$STORE" write state 2 <"$ROOT/hold" 2>&1); rc=$?
+exec 3>&-
+[[ $rc -eq 1 && $err == *"gave up after 1s"* ]] || fail "a write whose stdin never closes should give up with exit 1 (rc=$rc err=$err)"
+[[ $(store read state) == '{}' ]] || fail "a write that gave up should leave the old text in place"
+[[ -z $(ls -A "$DIR" | grep '\.tmp\.') ]] || fail "a write that gave up should leave no temp file"
+
 # --- usage errors
-"$STORE" read nothing >/dev/null 2>&1; [[ $? -eq 2 ]] || fail "an unknown file name should be a usage error"
-"$STORE" write state >/dev/null 2>&1 && fail "write without a byte count should be refused"
+store read nothing >/dev/null 2>&1; [[ $? -eq 2 ]] || fail "an unknown file name should be a usage error"
+store write state >/dev/null 2>&1 && fail "write without a byte count should be refused"
 
 if ((failures)); then
   echo; echo "$failures failing"

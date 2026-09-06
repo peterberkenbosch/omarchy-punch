@@ -244,6 +244,7 @@ Item {
           height: root.headerHeight
 
           Text {
+            textFormat: Text.PlainText
             id: prompt
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -254,6 +255,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.left: prompt.right
             anchors.leftMargin: Style.space(10)
             anchors.right: hintText.left
@@ -268,6 +270,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             id: hintText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -289,6 +292,7 @@ Item {
           spacing: Style.space(2)
 
           Text {
+            textFormat: Text.PlainText
             visible: root.rows.length === 0
             width: parent.width
             text: "No projects yet. Type a name and press enter."
@@ -315,6 +319,7 @@ Item {
         PanelSeparator { foreground: root.foreground }
 
         Text {
+          textFormat: Text.PlainText
           id: footer
           width: parent.width
           text: "enter start · :note on the running entry · ctrl+n/p move · esc close"
@@ -361,6 +366,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         visible: switchRow.row && (switchRow.row.kind === "stop" || switchRow.row.kind === "note")
         text: switchRow.row && switchRow.row.kind === "note" ? "󰲶" : "󰓛"
@@ -370,6 +376,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: label
         anchors.verticalCenter: parent.verticalCenter
         text: switchRow.row ? switchRow.row.label : ""
@@ -380,6 +387,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       anchors.right: parent.right
       anchors.rightMargin: Style.space(10)
       anchors.verticalCenter: parent.verticalCenter

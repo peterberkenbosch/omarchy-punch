@@ -256,6 +256,7 @@ Panel {
     // Vertical bars have no room for a label, so the glyph carries it and
     // the tooltip carries the rest.
     Text {
+      textFormat: Text.PlainText
       visible: root.vertical
       anchors.centerIn: parent
       text: root.tracking ? root.runGlyph : root.idleGlyph
@@ -335,6 +336,7 @@ Panel {
               spacing: Style.space(12)
 
               Text {
+                textFormat: Text.PlainText
                 text: root.tracking ? root.runGlyph : root.idleGlyph
                 color: root.activeColor
                 font.family: root.fontFamily
@@ -347,6 +349,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.tracking ? root.projectName : "Not tracking"
                   color: root.foreground
@@ -357,6 +360,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.tracking ? Model.preciseDuration(root.elapsed) : "—:—:—"
                   color: root.tracking ? root.activeColor : root.dim
@@ -374,6 +378,7 @@ Panel {
                   implicitHeight: editing ? noteField.implicitHeight : noteText.implicitHeight
 
                   Text {
+                    textFormat: Text.PlainText
                     id: noteText
                     visible: !parent.editing
                     anchors.left: parent.left
@@ -477,6 +482,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.top: strip.bottom
               anchors.topMargin: Style.space(3)
@@ -487,6 +493,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.right
               anchors.top: strip.bottom
               anchors.topMargin: Style.space(3)
@@ -507,6 +514,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: !!root.punch && root.punch.syncEnabled && root.punch.pendingSync > 0
             text: {
@@ -561,6 +569,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.rows.length === 0
               width: parent.width
               text: "Nothing tracked today."
@@ -598,6 +607,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "enter resume · d note · s start/stop · p switch · +/- 5 min · x delete"
             color: root.dim
@@ -621,6 +631,7 @@ Panel {
     spacing: Style.space(1)
 
     Text {
+      textFormat: Text.PlainText
       text: totalBlock.label
       color: root.dim
       font.family: root.fontFamily
@@ -630,6 +641,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       text: Model.clockDuration(totalBlock.seconds)
       color: root.foreground
       font.family: root.fontFamily
@@ -672,6 +684,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: totalLabel
         text: totalRow.project
         color: root.foreground
@@ -681,6 +694,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       anchors.right: parent.right
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
@@ -732,6 +746,7 @@ Panel {
         spacing: 0
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: entryRow.entry ? entryRow.entry.project : ""
           color: root.foreground
@@ -756,6 +771,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               id: rowRange
               text: entryRow.entry
                 ? Model.clockTime(entryRow.entry.start) + "–" + (entryRow.live ? "now" : Model.clockTime(entryRow.entry.end))
@@ -766,6 +782,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: Math.max(0, rowMeta.width - rowRange.width - rowMeta.spacing)
               text: entryRow.entry && entryRow.entry.note ? entryRow.entry.note : (entryRow.live ? "" : "add a note…")
               opacity: entryRow.entry && entryRow.entry.note ? 1.0 : 0.45
@@ -821,6 +838,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.alignment: Qt.AlignVCenter
         visible: !!(entryRow.entry && entryRow.entry.moneybird && entryRow.entry.moneybird.id)
         text: "󰄬"
@@ -836,6 +854,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.alignment: Qt.AlignVCenter
         text: entryRow.entry ? Model.clockDuration(entryRow.entry.end - entryRow.entry.start) : ""
         color: entryRow.live ? root.activeColor : root.foreground

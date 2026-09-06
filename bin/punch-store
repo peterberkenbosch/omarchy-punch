@@ -6,6 +6,10 @@
 #   punch-store read  <state|entries>          file text on stdout, or nothing
 #   punch-store write <state|entries> <bytes>  new text on stdin, exactly <bytes>
 #
+# It expects a clean environment (HOME and XDG_DATA_HOME, nothing else) and
+# refuses to run if any PERL* variable reaches it, and it gives up on its own
+# after 20 seconds whatever it was waiting for.
+#
 # Every operation is relative to a directory descriptor, never to a pathname:
 #
 #   - The data directory ($XDG_DATA_HOME/punch, default
@@ -42,6 +46,14 @@ my %FILES = (
 );
 
 my $STALE_TEMP_SECONDS = 3600;
+
+# Whatever the caller is doing, this process is over within this many
+# seconds: a stdin that never closes or a disk that never answers becomes
+# exit 1 with a reason, not a helper the service has to hunt down. The service
+# keeps its own, longer, fence on top. PUNCH_STORE_TIMEOUT exists for the
+# test suite; the service starts this helper with an environment that does
+# not carry it.
+my $DEADLINE_SECONDS = 20;
 
 sub fail {
   my ($message) = @_;
@@ -204,6 +216,20 @@ sub write_file {
   }
   exit 0;
 }
+
+# perl acts on PERL5OPT, PERL5LIB, PERLLIB, PERL5DB and their relatives before
+# the first line of this script runs, so a check here cannot undo what one of
+# them did. The service therefore starts this helper with a cleared
+# environment (HOME and XDG_DATA_HOME only), and this refusal is the tripwire:
+# a caller that did not clear it fails loudly rather than appearing to work.
+my @loader_vars = sort grep { /^PERL/ } keys %ENV;
+fail("refusing to run with " . join(", ", @loader_vars) . " set; the service starts this helper with a clean environment") if @loader_vars;
+
+if (defined $ENV{PUNCH_STORE_TIMEOUT} && $ENV{PUNCH_STORE_TIMEOUT} =~ /^\d+$/ && $ENV{PUNCH_STORE_TIMEOUT} > 0 && $ENV{PUNCH_STORE_TIMEOUT} <= 3600) {
+  $DEADLINE_SECONDS = $ENV{PUNCH_STORE_TIMEOUT};
+}
+$SIG{ALRM} = sub { fail("gave up after ${DEADLINE_SECONDS}s") };
+alarm $DEADLINE_SECONDS;
 
 my ($command, $which, $bytes) = @ARGV;
 my $spec = defined $which ? $FILES{$which} : undef;

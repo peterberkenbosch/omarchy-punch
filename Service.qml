@@ -414,6 +414,26 @@ Item {
   // replaced rather than written through. The helper also refuses to read a
   // file over its byte ceiling, so a text never reaches this side unbounded.
   //
+  // The helper's process contract, and what each part of it is for:
+  //
+  //   - It runs as a direct child with a cleared environment. Only HOME and
+  //     XDG_DATA_HOME cross over, because perl acts on PERL5OPT, PERL5LIB,
+  //     PERLLIB, PERL5DB and their relatives before the first line of the
+  //     script runs, which is before any of its checks. The helper refuses
+  //     to run if it sees such a variable anyway, so an unclean caller fails
+  //     loudly rather than appearing to work.
+  //   - Every run has a deadline. The helper gives up on its own after 20 s
+  //     (a stdin that never closes, a disk that never answers); this side
+  //     keeps a 30 s fence on top: SIGTERM, then SIGKILL five seconds later.
+  //     Either way the run is treated as a failed read or write, the log in
+  //     memory stays as it was, and the next action tries again.
+  //   - The helper is one process with no children, so a signal to it is the
+  //     whole cleanup. A write killed mid-way leaves at most a temp file the
+  //     next write sweeps, never a partial state.json: publication is a
+  //     rename, and a rename either happened or did not.
+  //   - On component destruction both processes are sent SIGTERM, and
+  //     Quickshell follows with SIGKILL.
+  //
   // The two FileViews further down never load anything (preload: false).
   // They are only the inotify hook that says a file changed under us, at
   // which point the helper reads it again — which is how an edit made with
@@ -429,6 +449,17 @@ Item {
   property var readQueue: []
   property bool stateRead: false
   property bool entriesRead: false
+
+  // Everything the helper is allowed to inherit. Anything else the shell was
+  // started with, including whatever a login script exported for perl, stops
+  // here.
+  readonly property var storeEnvironment: {
+    var env = { HOME: home }
+    var dataHome = Quickshell.env("XDG_DATA_HOME")
+    if (dataHome) env.XDG_DATA_HOME = String(dataHome)
+    return env
+  }
+  readonly property int storeDeadlineMs: 30000
 
   // Text queued for the next write of each file; null when nothing is
   // waiting. Writes are one at a time and the newest text wins, so a burst
@@ -485,6 +516,20 @@ Item {
     storeWriter.stdinEnabled = true
     storeWriter.command = [storeHelper, "write", which, String(Model.utf8Length(text))]
     storeWriter.running = true
+  }
+
+  // The deadline, or destruction, cancelling a run in flight: SIGTERM now,
+  // SIGKILL if the helper is still there five seconds later. The exit
+  // handler sees the reason and reports the run as failed.
+  function cancelStore(proc, reason) {
+    if (!proc.running) return
+    proc.cancelReason = reason
+    proc.signal(15)
+    storeKill.restart()
+  }
+
+  function storeDeadlineReason(action) {
+    return "punch-store " + action + " did not finish within " + Math.round(storeDeadlineMs / 1000) + " seconds"
   }
 
   function finishWrite(which, exitCode, err) {
@@ -576,12 +621,22 @@ Item {
   Process {
     id: storeReader
     property string which: ""
+    property string cancelReason: ""
+    clearEnvironment: true
+    environment: root.storeEnvironment
     running: false
     command: []
+    onStarted: {
+      cancelReason = ""
+      readDeadline.restart()
+    }
     stdout: StdioCollector { id: storeReadOut; waitForEnd: true }
     stderr: StdioCollector { id: storeReadErr; waitForEnd: true }
     onExited: function(exitCode) {
-      root.finishRead(which, exitCode, storeReadOut.text, storeReadErr.text)
+      readDeadline.stop()
+      var reason = cancelReason
+      cancelReason = ""
+      root.finishRead(which, reason ? 1 : exitCode, storeReadOut.text, reason || storeReadErr.text)
     }
   }
 
@@ -589,10 +644,15 @@ Item {
     id: storeWriter
     property string which: ""
     property string payload: ""
+    property string cancelReason: ""
+    clearEnvironment: true
+    environment: root.storeEnvironment
     stdinEnabled: true
     running: false
     command: []
     onStarted: {
+      cancelReason = ""
+      writeDeadline.restart()
       write(payload)
       payload = ""
       // Closing stdin is what gives the helper its EOF. Doing it in the same
@@ -604,7 +664,37 @@ Item {
     }
     stderr: StdioCollector { id: storeWriteErr; waitForEnd: true }
     onExited: function(exitCode) {
-      root.finishWrite(which, exitCode, storeWriteErr.text)
+      writeDeadline.stop()
+      var reason = cancelReason
+      cancelReason = ""
+      root.finishWrite(which, reason ? 1 : exitCode, reason || storeWriteErr.text)
+    }
+  }
+
+  Timer {
+    id: readDeadline
+    interval: root.storeDeadlineMs
+    repeat: false
+    onTriggered: root.cancelStore(storeReader, root.storeDeadlineReason("read"))
+  }
+
+  Timer {
+    id: writeDeadline
+    interval: root.storeDeadlineMs
+    repeat: false
+    onTriggered: root.cancelStore(storeWriter, root.storeDeadlineReason("write"))
+  }
+
+  // A helper that ignored SIGTERM gets SIGKILL. Only a run that was
+  // cancelled is eligible: a fresh run that started in the meantime has an
+  // empty reason and is left alone.
+  Timer {
+    id: storeKill
+    interval: 5000
+    repeat: false
+    onTriggered: {
+      if (storeReader.running && storeReader.cancelReason) storeReader.signal(9)
+      if (storeWriter.running && storeWriter.cancelReason) storeWriter.signal(9)
     }
   }
 
@@ -750,9 +840,13 @@ Item {
   onSyncEnabledChanged: if (!syncEnabled) cancelSync("moneybird sync was switched off")
 
   Component.onDestruction: {
-    // Quickshell follows this with SIGKILL on the parent; the helper handles
-    // either by tearing down its own tree.
+    // Quickshell follows each of these with SIGKILL. The sync parent's helper
+    // handles either by tearing down its own tree; the store helper has no
+    // tree, and a write it was in the middle of is a temp file, not a
+    // half-published log.
     if (syncProcess.running) syncProcess.signal(15)
+    if (storeReader.running) storeReader.signal(15)
+    if (storeWriter.running) storeWriter.signal(15)
   }
 
   function applySyncRun(exitCode, out, err) {
