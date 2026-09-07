@@ -26,6 +26,16 @@ omarchy plugin add https://github.com/peterberkenbosch/omarchy-punch.git --enabl
 ln -sf ~/.config/omarchy/plugins/pb.punch/bin/punch ~/.local/bin/punch
 ```
 
+The marketplace verifies one exact commit, but `omarchy plugin add` and
+`omarchy plugin update` clone whatever `main` is at that moment, so the listing
+carries a notice saying so. Releases are tagged, so you can see what you got
+and pin it if you want to:
+
+```bash
+git -C ~/.config/omarchy/plugins/pb.punch describe --tags   # e.g. v1.0.2
+git -C ~/.config/omarchy/plugins/pb.punch checkout v1.0.2
+```
+
 Or, working on a local checkout:
 
 ```bash
@@ -335,6 +345,23 @@ bash test/moneybird-test.sh   # punch-moneybird: bounds, deadline, cancel, orpha
 The Moneybird test starts a push against a CLI stub that hangs, then kills it
 three ways (its own deadline, SIGTERM, and SIGKILL of its parent) and checks
 that the stub and the child it spawned are gone each time.
+
+### Releasing
+
+Every release bumps `version` in `manifest.json`, gets a `vX.Y.Z` tag, and has
+a section in `CHANGELOG.md`. Write the changes under `Unreleased` as you go,
+then, on a clean `main`:
+
+```bash
+script/release 1.0.3
+```
+
+That runs the tests, bumps the manifest, dates the changelog section, commits
+`Release v1.0.3` and tags it. It pushes nothing. The script prints the push and
+`gh release` commands, and the marketplace form to file so the listing's
+verified snapshot moves to the new commit. Until that request is approved the
+listing shows the release as `Update unverified`, which is also what any other
+push to `main` does, so keep work on a branch and merge it at release time.
 
 ## Not in this version
 

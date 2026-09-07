@@ -1,0 +1,61 @@
+#!/bin/bash
+# Cut a release: bump manifest.json, date the Unreleased changelog section,
+# run the tests, commit, and tag. Nothing is pushed.
+#
+#   script/release 1.0.3          make the release commit and tag v1.0.3
+#   script/release --notes 1.0.3  print the changelog section for 1.0.3
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() {
+  echo "release: $*" >&2
+  exit 1
+}
+
+notes() {
+  awk -v v="$1" '
+    $0 ~ "^## \\[" v "\\]" { on = 1; next }
+    /^## / { on = 0 }
+    on
+  ' CHANGELOG.md | sed -e '1{/^$/d}' -e '${/^$/d}'
+}
+
+if [[ ${1:-} == --notes ]]; then
+  [[ -n ${2:-} ]] || fail "usage: script/release --notes X.Y.Z"
+  notes "$2"
+  exit 0
+fi
+
+version=${1:-}
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "usage: script/release X.Y.Z"
+[[ $(git branch --show-current) == main ]] || fail "release from main"
+[[ -z $(git status --porcelain) ]] || fail "working tree is not clean"
+[[ $(jq -r .version manifest.json) != "$version" ]] || fail "manifest.json is already $version"
+! git rev-parse -q --verify "refs/tags/v$version" >/dev/null || fail "tag v$version already exists"
+grep -q '^## \[Unreleased\]$' CHANGELOG.md || fail "CHANGELOG.md has no Unreleased section"
+[[ -n $(notes Unreleased) ]] || fail "nothing listed under Unreleased in CHANGELOG.md"
+
+bash test/run.sh || fail "tests failed"
+
+jq --arg v "$version" '.version = $v' manifest.json > manifest.json.tmp
+mv manifest.json.tmp manifest.json
+perl -0pi -e "s/^## \[Unreleased\]\n/## [Unreleased]\n\n## [$version] - $(date +%F)\n/m" CHANGELOG.md
+
+git add manifest.json CHANGELOG.md
+git commit -q -m "Release v$version"
+git tag -a "v$version" -m "Punch $version"
+
+sha=$(git rev-parse HEAD)
+cat <<MSG
+
+Released v$version at $sha. Nothing is pushed yet. Next:
+
+  git push origin main --follow-tags
+  gh release create v$version --title "Punch $version" --notes "\$(script/release --notes $version)"
+
+Then ask the marketplace to move its verified snapshot to this commit:
+https://github.com/omacom/omarchy-plugin-marketplace/issues/new?template=verify-plugin.yml
+Choose "Verify and publish a newer upstream commit", plugin ID pb.punch,
+repository https://github.com/peterberkenbosch/omarchy-punch, commit $sha.
+MSG
